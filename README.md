@@ -143,48 +143,24 @@ SERVE_STATIC=0 ALLOWED_ORIGINS=https://vault.example.com PORT=8787 node server.j
 | 目录权限 | 运行账户需对项目目录**可写**（`data/` 要落盘） |
 | 常驻运行 | 用 `systemd` / `pm2` / `docker` 托管，别用前台 `node server.js` 跑生产 |
 
-### 一定要托管成服务，否则关掉终端网站就没了
+一个最小可用的 systemd 单元：
 
-在终端里直接 `node server.js`，这个进程是**当前 SSH 会话的子进程**。
-会话一结束——关掉 VS Code、断网、`Ctrl+D`——内核会给它发 `SIGHUP`，进程直接退出，
-网站就打不开了。表现是「关掉编辑器后网页无法访问」，而且重新连上去 `ps aux | grep node`
-会发现进程已经不在，不是报错，是没了。
+```ini
+[Unit]
+Description=Personal Vault
+After=network.target
 
-三种处理方式：
+[Service]
+WorkingDirectory=/opt/personal-vault
+ExecStart=/usr/bin/node server.js
+Environment=PORT=8787
+Environment=NODE_ENV=production
+Restart=always
+User=vault
 
-| 方式 | 断线后存活 | 崩溃自动重启 | 开机自启 | 适用场景 |
-|---|---|---|---|---|
-| `nohup node server.js &` | ✅ | ❌ | ❌ | 临时跑一下 |
-| `screen` / `tmux` | ✅ | ❌ | ❌ | 调试、看日志 |
-| **systemd** | ✅ | ✅ | ✅ | **正式部署，推荐** |
-
-仓库里已经准备好单元文件：**`deploy/vault.service`**，里面每项都有注释。
-安装步骤：
-
-```bash
-# 1. 按实际情况改 User / WorkingDirectory / ExecStart 三处
-which node                                   # 确认 node 路径
-ls -ld /home/admin/personal-vault            # 确认目录归属
-
-# 2. 安装并启用
-sudo cp deploy/vault.service /etc/systemd/system/vault.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now vault
-
-# 3. 看状态和日志
-sudo systemctl status vault
-sudo journalctl -u vault -f
+[Install]
+WantedBy=multi-user.target
 ```
-
-改完代码后重启：
-
-```bash
-cd /home/admin/personal-vault && git pull && sudo systemctl restart vault
-```
-
-> 如果之前用 `sudo node server.js` 跑过，`data/` 和 `config.json` 可能属于 root，
-> 换成普通用户运行会写入失败。先修一下归属：
-> `sudo chown -R admin:admin /home/admin/personal-vault`
 
 ---
 
@@ -206,7 +182,6 @@ public/app.js         前端逻辑（所有请求统一经 apiUrl() 拼地址）
 public/styles.css     样式与响应式规则
 config.json           站点配置（注册码），首次启动自动生成，不入 Git
 config.example.json   配置模板（入 Git）
-deploy/vault.service  systemd 单元文件，用于常驻运行
 data/vault.db         SQLite 数据库（账号 + 文件索引）
 data/uploads/         文件本体，按用户分文件夹
 data/secret.key       会话签名密钥
