@@ -76,6 +76,7 @@ const state = {
   query: '',         // 搜索关键词
   sort: 'newest',    // 排序方式
   lightboxId: null,  // 灯箱里正在看哪个文件
+  lightboxNavigating: false, // 是否正在为灯箱加载下一页
   total: 0,          // 当前筛选条件下共有多少条（由服务器告知）
   hasMore: false,    // 是否还有下一页
   loadingMore: false, // 是否正在加载下一页
@@ -209,7 +210,7 @@ function uniqueFiles(fileList) {
  *
  * 改动前端功能时记得同步这里和 package.json。
  */
-const APP_VERSION = '1.4.4'
+const APP_VERSION = '1.4.5'
 
 async function api(path, options = {}) {
   /**
@@ -1285,18 +1286,73 @@ function setupAudioPlayer(container) {
 
 /* ───────────────────────────── 灯箱容器 ───────────────────────────── */
 
+/** 当前预览文件在已加载列表中的位置。 */
+function lightboxRecordIndex(id = state.lightboxId) {
+  return state.files.findIndex((row) => row.id === id)
+}
+
+/** 根据当前位置更新左右切换按钮。 */
+function updateLightboxNavigation() {
+  const prev = $('#lightbox-prev')
+  const next = $('#lightbox-next')
+  const index = lightboxRecordIndex()
+  const hasMultiple = state.total > 1 || state.files.length > 1
+
+  prev.hidden = !hasMultiple
+  next.hidden = !hasMultiple
+  prev.disabled = index <= 0 || state.lightboxNavigating
+  next.disabled = state.lightboxNavigating || index < 0 || (index >= state.files.length - 1 && !state.hasMore)
+}
+
+/** 切换预览时先暂停上一份音视频，避免后台继续播放。 */
+function pauseLightboxMedia() {
+  const media = $('#lightbox-body audio, #lightbox-body video')
+  if (media) media.pause()
+}
+
+/** 按当前筛选和排序顺序切换上一个 / 下一个文件。 */
+async function navigateLightbox(direction) {
+  if (!state.lightboxId || state.lightboxNavigating) return
+  let index = lightboxRecordIndex()
+  if (index < 0) return
+
+  if (direction > 0 && index >= state.files.length - 1 && state.hasMore) {
+    const expectedId = state.lightboxId
+    state.lightboxNavigating = true
+    updateLightboxNavigation()
+    try {
+      await loadMore()
+    } finally {
+      state.lightboxNavigating = false
+    }
+    if (state.lightboxId !== expectedId) return
+  }
+
+  index = lightboxRecordIndex()
+  const targetIndex = index + direction
+  if (targetIndex < 0 || targetIndex >= state.files.length) {
+    updateLightboxNavigation()
+    return
+  }
+  openLightbox(state.files[targetIndex].id)
+}
+
 function openLightbox(id) {
   const record = state.files.find((row) => row.id === id)
   if (!record) return
+  pauseLightboxMedia()
   state.lightboxId = id
 
   const raw = apiUrl(`/api/files/${record.id}/raw`)
   const inTrash = Boolean(record.deletedAt)
-
-  $('#lightbox-name').textContent = record.name
-  $('#lightbox-sub').textContent = inTrash
+  const index = lightboxRecordIndex(id)
+  const position = state.total > 1 && index >= 0 ? ` · ${index + 1} / ${state.total}` : ''
+  const summary = inTrash
     ? `${CATEGORY_LABEL[record.category]} · ${formatSize(record.size)} · ${trashRemainText(record)}`
     : `${CATEGORY_LABEL[record.category]} · ${formatSize(record.size)} · ${formatDate(record.createdAt)}`
+
+  $('#lightbox-name').textContent = record.name
+  $('#lightbox-sub').textContent = `${summary}${position}`
   $('#lightbox-download').href = apiUrl(`/api/files/${record.id}/download`)
 
   // 回收站里：显示「恢复」，删除按钮改成「彻底删除」
@@ -1354,6 +1410,7 @@ function openLightbox(id) {
 
   $('#lightbox').hidden = false
   document.body.style.overflow = 'hidden'
+  updateLightboxNavigation()
 }
 
 function closeLightbox() {
@@ -1367,6 +1424,7 @@ function closeLightbox() {
   resetZoom()
   box.hidden = true
   state.lightboxId = null
+  state.lightboxNavigating = false
   document.body.style.overflow = ''
 }
 
@@ -1610,6 +1668,8 @@ function bindApp() {
   $('#lightbox').addEventListener('click', (event) => {
     if (event.target.closest('[data-close]')) closeLightbox()
   })
+  $('#lightbox-prev').addEventListener('click', () => navigateLightbox(-1))
+  $('#lightbox-next').addEventListener('click', () => navigateLightbox(1))
   $('#lightbox-restore').addEventListener('click', () => {
     if (state.lightboxId) restoreFile(state.lightboxId)
   })
@@ -1652,6 +1712,16 @@ function bindApp() {
         if (event.key === 'ArrowUp') zoom.y -= step
         if (event.key === 'ArrowDown') zoom.y += step
         applyZoom()
+        return
+      }
+    }
+
+    if (!$('#lightbox').hidden && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')) {
+      const target = event.target
+      const editing = target && target.closest && target.closest('input, textarea, select, audio, video, [contenteditable="true"]')
+      if (!editing) {
+        event.preventDefault()
+        navigateLightbox(event.key === 'ArrowLeft' ? -1 : 1)
         return
       }
     }

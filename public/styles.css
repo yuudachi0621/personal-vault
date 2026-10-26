@@ -491,6 +491,20 @@ a { color: inherit; text-decoration: none; }
 .lightbox-body .file-preview { display: grid; place-items: center; gap: 14px; padding: 64px 32px; text-align: center; }
 .lightbox-body .file-preview svg { width: 58px; height: 58px; color: var(--muted); }
 .lightbox-body .file-preview p { margin: 0; font-size: 13.5px; color: var(--muted); }
+.lightbox-nav {
+  position: absolute; top: 50%; z-index: 2; transform: translateY(-50%);
+  display: grid; place-items: center; width: 44px; height: 58px; padding: 0;
+  color: var(--text); background: rgba(255, 255, 255, .86);
+  border: 1px solid rgba(214, 210, 196, .8); border-radius: 999px;
+  box-shadow: var(--shadow-md); backdrop-filter: blur(8px);
+  transition: background .16s, transform .16s, opacity .16s;
+}
+.lightbox-nav:hover { background: var(--surface); }
+.lightbox-nav:active { transform: translateY(-50%) scale(.96); }
+.lightbox-nav.is-prev { left: 14px; }
+.lightbox-nav.is-next { right: 14px; }
+.lightbox-nav:disabled { opacity: .28; cursor: not-allowed; }
+.lightbox-nav svg { width: 21px; height: 21px; }
 
 /* ── 图片缩放 ──────────────────────────────────────────────────────────
    stage 负责接收指针事件和裁切画面，img 用 object-fit: contain 完整显示，
