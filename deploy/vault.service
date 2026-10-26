@@ -1,0 +1,62 @@
+# ============================================================================
+#  systemd 服务单元 —— 让网站在关闭 SSH / VS Code 之后继续运行
+# ============================================================================
+#
+# 【为什么需要它】
+#   在终端里直接 `node server.js`，这个进程是当前 SSH 会话的子进程。
+#   会话一结束（关掉 VS Code、断网、Ctrl+D），内核会给它发 SIGHUP，进程随之退出，
+#   网站就打不开了。systemd 托管的进程归属于 init（1 号进程），与会话无关。
+#
+# 【安装】
+#   1. 按实际情况改下面三处：User、WorkingDirectory、ExecStart 里的 node 路径
+#      - 查 node 路径：which node
+#      - 确认目录归属：ls -ld /home/admin/personal-vault
+#   2. 复制到系统目录并启用：
+#        sudo cp deploy/vault.service /etc/systemd/system/vault.service
+#        sudo systemctl daemon-reload
+#        sudo systemctl enable --now vault
+#   3. 查看状态与日志：
+#        sudo systemctl status vault
+#        sudo journalctl -u vault -f
+#
+# 【改了代码之后】
+#        cd /home/admin/personal-vault && git pull && sudo systemctl restart vault
+# ============================================================================
+
+[Unit]
+Description=Personal Vault (个人云存储)
+Documentation=file:/home/admin/personal-vault/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# ↓ 改成实际运行用户。别用 root，最小权限原则。
+User=admin
+Group=admin
+
+# ↓ 项目所在目录
+WorkingDirectory=/home/admin/personal-vault
+
+# ↓ node 路径。用 which node 确认；NodeSource 安装的通常在 /usr/bin/node
+ExecStart=/usr/bin/node server.js
+
+Environment=NODE_ENV=production
+Environment=PORT=8787
+
+# 崩溃、被 OOM 杀掉之后自动拉起，3 秒后重试
+Restart=always
+RestartSec=3
+
+# 日志交给 journald 统一管理，不用自己写文件、也不用担心日志无限增长
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vault
+
+# 一些基础加固：只读系统目录、禁止提权
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
