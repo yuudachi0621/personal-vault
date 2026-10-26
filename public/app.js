@@ -38,7 +38,7 @@
 
    【整体结构】按下面的分节标题顺序阅读即可
      通用工具 → Toast 提示 → 视图切换 → 认证 → 列表渲染
-     → 数据加载 → 上传 → 灯箱预览 → 事件绑定 → 启动
+     → 数据加载 → 上传 → 图片缩放 → 音乐播放器 → 灯箱 → 事件绑定 → 启动
    ══════════════════════════════════════════════════════════════════════════ */
 
 /**
@@ -50,7 +50,7 @@
 const $ = (sel, root = document) => root.querySelector(sel)
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel))
 
-const CATEGORY_LABEL = { all: '全部', image: '照片', video: '视频', file: '文件' }
+const CATEGORY_LABEL = { all: '全部', image: '照片', video: '视频', music: '音乐', file: '文件' }
 
 /**
  * 后端地址。默认空串 = 与页面同源（一体部署）。
@@ -80,6 +80,8 @@ const state = {
   hasMore: false,    // 是否还有下一页
   loadingMore: false, // 是否正在加载下一页
   requireRegistrationCode: false, // 服务端是否要求注册码（决定要不要显示那个输入框）
+  trash: false,      // 是否处于回收站视图
+  ttlMs: 24 * 60 * 60 * 1000, // 回收站保留时长（由服务器下发，前端只用来算倒计时）
 }
 
 /**
@@ -139,6 +141,76 @@ function extOf(name) {
  * @param {object} options 额外配置，例如 { method: 'POST', body: '...' }
  * @returns {Promise<object>} 后端返回的 JSON 数据
  */
+/**
+ * 页面内部是否正在拖拽。
+ *
+ * 只看 dataTransfer.types 并不够：浏览器把页面里的图片拖起来时也可能只暴露
+ * 'Files'，和从桌面拖入文件无法区分，这正是「拖一下图片就多传一份」的来源。
+ * 因此从 dragstart 开始明确标记来源，直到 dragend / drop 才解除。
+ */
+let internalDragActive = false
+let internalDragResetTimer = 0
+
+function markInternalDragStart() {
+  internalDragActive = true
+  clearTimeout(internalDragResetTimer)
+  // 兜底：某些浏览器拖拽取消时不会触发 dragend，不能让标记永久卡住
+  internalDragResetTimer = setTimeout(() => {
+    internalDragActive = false
+  }, 10_000)
+}
+
+function markInternalDragEnd() {
+  clearTimeout(internalDragResetTimer)
+  // 等当前 drop 事件处理完再解除，避免事件顺序不同造成误判
+  internalDragResetTimer = setTimeout(() => {
+    internalDragActive = false
+  }, 0)
+}
+
+/**
+ * 判断这次拖拽是不是「从系统里拖文件进来」。
+ *
+ * 页面内部 dragstart 会先设置 internalDragActive，所以即使浏览器给内部拖拽
+ * 伪造了 Files，也不会被当成上传。text/html / text/uri-list 继续作为第二道判断。
+ */
+function isExternalFileDrag(dataTransfer) {
+  if (internalDragActive || !dataTransfer) return false
+  const types = Array.from(dataTransfer.types || [])
+  if (!types.includes('Files')) return false
+  return !types.includes('text/html') && !types.includes('text/uri-list')
+}
+
+/** 同一个文件在一次拖拽 / 选择里的稳定指纹。 */
+function fileSignature(file) {
+  return JSON.stringify([file.name, file.size, file.lastModified || 0, file.type || ''])
+}
+
+/** 合并同一次操作中重复出现的 File，避免一次拖拽生成多条上传请求。 */
+function uniqueFiles(fileList) {
+  const seen = new Set()
+  return Array.from(fileList || []).filter((file) => {
+    const key = fileSignature(file)
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
+/**
+ * 前端自身的版本号。
+ *
+ * 【为什么要显示它】
+ *   这个项目是「拷文件部署」的，很容易出现服务器跑着旧代码、
+ *   而你以为新功能已经生效的情况。把版本号显示在页面上，
+ *   一眼就能判断「我看到的这版到底是哪一版」——
+ *   如果页面上没有新功能、版本号却已经是新的，说明后端没更新；
+ *   如果版本号是旧的，说明前端没更新。
+ *
+ * 改动前端功能时记得同步这里和 package.json。
+ */
+const APP_VERSION = '1.4.2'
+
 async function api(path, options = {}) {
   /**
    * fetch 发起 HTTP 请求。两个要点：
@@ -238,6 +310,7 @@ function showAuth() {
   state.total = 0
   state.hasMore = false
   state.loadingMore = false
+  state.trash = false
   $('#app-view').hidden = true
   $('#auth-view').hidden = false
   $('#load-more-wrap').hidden = true
@@ -424,29 +497,71 @@ function fileGlyph(record) {
     </div>`
 }
 
+/** 音乐文件的占位图：一个音符 + 扩展名，比通用文件图标更好认。 */
+function musicGlyph(record) {
+  return `<div class="file-glyph music-glyph">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M9 17.5V5.2l11-1.9v12.3"/><circle cx="6.2" cy="17.6" r="2.8"/><circle cx="17.2" cy="15.7" r="2.8"/>
+      </svg>
+      <small>${escapeHtml(extOf(record.name))}</small>
+    </div>`
+}
+
+/**
+ * 把「还有多久自动清除」变成人话。
+ * 服务端会下发 expiresAt，前端直接用，不必自己再算一遍 24 小时。
+ */
+function trashRemainText(record) {
+  const expires = record.expiresAt
+    ? Date.parse(record.expiresAt)
+    : Date.parse(record.deletedAt) + state.ttlMs
+  if (Number.isNaN(expires)) return '待清除'
+
+  const left = expires - Date.now()
+  if (left <= 0) return '即将清除'
+  if (left >= 60 * 60 * 1000) return `${Math.floor(left / (60 * 60 * 1000))} 小时后清除`
+  return `${Math.max(1, Math.floor(left / 60000))} 分钟后清除`
+}
+
 function cardHtml(record) {
   const raw = apiUrl(`/api/files/${record.id}/raw`)
+  const inTrash = Boolean(record.deletedAt)
+
   let thumb
   if (record.category === 'image') {
-    thumb = `<img src="${raw}" alt="${escapeHtml(record.name)}" loading="lazy" decoding="async">`
+    thumb = `<img src="${raw}" alt="${escapeHtml(record.name)}" loading="lazy" decoding="async" draggable="false">`
   } else if (record.category === 'video') {
-    thumb = `<video src="${raw}#t=0.5" preload="metadata" muted playsinline></video>
+    thumb = `<video src="${raw}#t=0.5" preload="metadata" muted playsinline draggable="false"></video>
       <div class="card-play"><span><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.2v13.6L19 12z"/></svg></span></div>`
+  } else if (record.category === 'music') {
+    thumb = musicGlyph(record)
   } else {
     thumb = fileGlyph(record)
   }
 
-  return `<article class="card" data-id="${record.id}" tabindex="0">
-    <div class="card-thumb" data-open>
-      <span class="card-badge" data-cat="${record.category}"><i></i>${CATEGORY_LABEL[record.category]}</span>
-      <div class="card-actions">
-        <a href="${apiUrl(`/api/files/${record.id}/download`)}" title="下载" aria-label="下载" data-no-open>
+  // 回收站里的卡片：角标显示倒计时，操作换成「恢复 / 彻底删除」
+  const badge = inTrash
+    ? `<span class="card-badge is-trash" data-cat="trash"><i></i>${escapeHtml(trashRemainText(record))}</span>`
+    : `<span class="card-badge" data-cat="${record.category}"><i></i>${CATEGORY_LABEL[record.category]}</span>`
+
+  const actions = inTrash
+    ? `<button type="button" title="恢复" aria-label="恢复" data-restore data-no-open>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 10a8 8 0 1 1 2.3 7"/><path d="M4 5v5h5"/></svg>
+        </button>
+        <button type="button" title="彻底删除" aria-label="彻底删除" data-purge data-no-open>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 7h14M9.5 7V5.5A1.5 1.5 0 0 1 11 4h2a1.5 1.5 0 0 1 1.5 1.5V7"/><path d="M6.5 7l.8 11a1.6 1.6 0 0 0 1.6 1.5h6.2a1.6 1.6 0 0 0 1.6-1.5l.8-11"/></svg>
+        </button>`
+    : `<a href="${apiUrl(`/api/files/${record.id}/download`)}" title="下载" aria-label="下载" data-no-open>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11m0 0-4-4m4 4 4-4"/><path d="M5 19h14"/></svg>
         </a>
         <button type="button" title="删除" aria-label="删除" data-delete data-no-open>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 7h14M9.5 7V5.5A1.5 1.5 0 0 1 11 4h2a1.5 1.5 0 0 1 1.5 1.5V7"/><path d="M6.5 7l.8 11a1.6 1.6 0 0 0 1.6 1.5h6.2a1.6 1.6 0 0 0 1.6-1.5l.8-11"/></svg>
-        </button>
-      </div>
+        </button>`
+
+  return `<article class="card${inTrash ? ' is-in-trash' : ''}" data-id="${record.id}" tabindex="0">
+    <div class="card-thumb" data-open>
+      ${badge}
+      <div class="card-actions">${actions}</div>
       ${thumb}
     </div>
     <div class="card-body">
@@ -462,20 +577,29 @@ function renderGrid() {
   const count = $('#view-count')
   const title = $('#view-title')
 
-  title.textContent = CATEGORY_LABEL[state.category]
+  // 回收站是独立视图，标题和分类无关
+  title.textContent = state.trash ? '回收站' : CATEGORY_LABEL[state.category]
   // 显示的是「总数」，不是「已加载数」—— 用户关心的是这里到底有多少东西
   count.textContent = `${state.total} 项`
+  $('#trash-banner').hidden = !state.trash
 
   if (!state.files.length) {
     grid.innerHTML = ''
     empty.hidden = false
     const searching = Boolean(state.query)
-    $('#empty-title').textContent = searching ? '没有匹配的文件' : '这里还是空的'
-    $('#empty-desc').textContent = searching
-      ? '换个关键词试试，或清空搜索框查看全部内容。'
-      : state.category === 'all'
-        ? '把视频、照片或文件拖进来，或点击右上角「上传」按钮。'
+
+    if (state.trash) {
+      $('#empty-title').textContent = '回收站是空的'
+      $('#empty-desc').textContent = '删除的文件会先放到这里，24 小时内可以恢复。'
+    } else if (searching) {
+      $('#empty-title').textContent = '没有匹配的文件'
+      $('#empty-desc').textContent = '换个关键词试试，或清空搜索框查看全部内容。'
+    } else {
+      $('#empty-title').textContent = '这里还是空的'
+      $('#empty-desc').textContent = state.category === 'all'
+        ? '把视频、照片、音乐或文件拖进来，或点击右上角「上传」按钮。'
         : `还没有${CATEGORY_LABEL[state.category]}，上传一些试试。`
+    }
     return
   }
 
@@ -489,18 +613,41 @@ function renderGrid() {
 function renderUsage() {
   const usage = state.usage
   if (!usage) return
-  $('#storage-value').textContent = formatSize(usage.bytes)
+
+  const activeBytes = usage.bytes || 0
+  const trashBytes = (usage.trash && usage.trash.bytes) || 0
+  const totalBytes = Number.isFinite(usage.totalBytes)
+    ? usage.totalBytes
+    : activeBytes + trashBytes
+
+  // 存储用量显示实际占用：正常文件 + 回收站文件，与上传配额的计算一致
+  $('#storage-value').textContent = formatSize(totalBytes)
+  $('#storage-value').title = trashBytes > 0
+    ? `正常文件 ${formatSize(activeBytes)}，回收站 ${formatSize(trashBytes)}`
+    : ''
+
   $$('[data-count]').forEach((node) => {
     const key = node.dataset.count
     node.textContent = key === 'all' ? usage.total : (usage.byCategory[key] || 0)
   })
-  const total = usage.bytes || 1
+  // 回收站条数（侧栏那个入口）
+  const trashCount = $('#trash-count')
+  if (trashCount) trashCount.textContent = (usage.trash && usage.trash.total) || 0
+
+  const trashRow = $('#storage-trash-row')
+  const trashBar = $('[data-bar="trash"]')
+  if (trashRow) trashRow.hidden = trashBytes <= 0
+  if (trashBar) trashBar.hidden = trashBytes <= 0
+
+  const total = totalBytes || 1
   $$('[data-bar]').forEach((node) => {
-    const bytes = usage.bytesByCategory[node.dataset.bar] || 0
+    const key = node.dataset.bar
+    const bytes = key === 'trash' ? trashBytes : (usage.bytesByCategory[key] || 0)
     node.style.setProperty('--w', `${(bytes / total) * 100}%`)
   })
   $$('[data-size]').forEach((node) => {
-    node.textContent = formatSize(usage.bytesByCategory[node.dataset.size] || 0)
+    const key = node.dataset.size
+    node.textContent = formatSize(key === 'trash' ? trashBytes : (usage.bytesByCategory[key] || 0))
   })
 }
 
@@ -553,6 +700,26 @@ function renderLoadMore() {
 }
 
 /**
+ * 按当前视图取一页数据。
+ *
+ * 正常列表和回收站是两个不同接口，但返回结构一致（files / usage / page），
+ * 所以在这里统一成同一个函数，上面的渲染逻辑完全不用关心数据来自哪。
+ */
+async function fetchPage(offset) {
+  if (state.trash) {
+    const params = new URLSearchParams()
+    if (state.query) params.set('q', state.query)
+    params.set('limit', String(PAGE_SIZE))
+    params.set('offset', String(offset))
+    const data = await api(`/api/trash?${params}`)
+    // 服务端下发保留时长，前端用它算倒计时，避免两边各写一份 24 小时
+    if (data.ttlMs) state.ttlMs = data.ttlMs
+    return data
+  }
+  return api(`/api/files?${buildListParams(offset)}`)
+}
+
+/**
  * 加载第一页，并重置列表。切换分类、搜索、排序、上传完成都会走这里。
  *
  * 它体现了前端最常用的思路：
@@ -575,7 +742,7 @@ async function refresh({ silent = false } = {}) {
 
   try {
     // 筛选和排序都由后端做（数据在服务器那边），前端只负责把条件传过去
-    const data = await api(`/api/files?${buildListParams(0)}`)
+    const data = await fetchPage(0)
 
     // 存进状态，再据此重新渲染
     state.files = data.files
@@ -618,7 +785,7 @@ async function loadMore() {
 
   try {
     // offset = 已加载数量，正好接在上一页后面
-    const data = await api(`/api/files?${buildListParams(state.files.length)}`)
+    const data = await fetchPage(state.files.length)
 
     state.files = state.files.concat(data.files)
     state.usage = data.usage
@@ -721,14 +888,392 @@ function uploadOne(file, forcedCategory) {
   })
 }
 
+// 正在上传的文件：即使同一个文件被连续拖入两次，也不会并发上传两份。
+const activeUploadKeys = new Set()
+
 async function uploadFiles(fileList, forcedCategory) {
-  const files = Array.from(fileList || [])
+  const files = uniqueFiles(fileList)
   if (!files.length) return
-  const results = await Promise.all(files.map((file) => uploadOne(file, forcedCategory)))
-  if (results.some(Boolean)) await refresh({ silent: true })
+
+  const accepted = files.filter((file) => !activeUploadKeys.has(fileSignature(file)))
+  if (!accepted.length) return
+
+  const keys = accepted.map(fileSignature)
+  keys.forEach((key) => activeUploadKeys.add(key))
+
+  try {
+    const results = await Promise.all(accepted.map((file) => uploadOne(file, forcedCategory)))
+    if (results.some(Boolean)) await refresh({ silent: true })
+  } finally {
+    keys.forEach((key) => activeUploadKeys.delete(key))
+  }
 }
 
-/* ───────────────────────────── 灯箱 ───────────────────────────── */
+/* ───────────────────────────── 图片缩放 ───────────────────────────── */
+
+/**
+ * 图片灯箱的缩放与平移状态。
+ *   scale  缩放倍数，1 表示完整适配预览区
+ *   x / y  相对中心的平移量（屏幕像素）
+ *   el     当前图片元素
+ *   stage  包裹图片、也是指针事件的接收区域
+ */
+const zoom = { scale: 1, x: 0, y: 0, el: null, stage: null }
+const ZOOM_MIN = 0.5
+const ZOOM_MAX = 8
+const PAN_MAX_FACTOR = 3
+
+/**
+ * 图片用 object-fit: contain 放进元素盒子里，盒子本身通常比实际画面宽或高。
+ * 平移边界必须按“真正画出来的图片尺寸”计算，不能拿整个盒子尺寸计算。
+ */
+function fittedImageSize() {
+  const width = zoom.el && zoom.el.clientWidth
+  const height = zoom.el && zoom.el.clientHeight
+  if (!width || !height) return { width: 0, height: 0 }
+
+  const naturalRatio = zoom.el.naturalWidth > 0 && zoom.el.naturalHeight > 0
+    ? zoom.el.naturalWidth / zoom.el.naturalHeight
+    : width / height
+  const boxRatio = width / height
+
+  return naturalRatio > boxRatio
+    ? { width, height: width / naturalRatio }
+    : { width: height * naturalRatio, height }
+}
+
+/**
+ * 限制平移范围，保证图片始终覆盖预览区，不会被拖到完全看不见。
+ * 只在某一边放大到超过预览区后才允许那一轴移动。
+ */
+function clampZoomPan() {
+  if (!zoom.el || !zoom.stage || zoom.scale <= 1) {
+    zoom.x = 0
+    zoom.y = 0
+    return
+  }
+
+  const image = fittedImageSize()
+  const stageWidth = zoom.stage.clientWidth
+  const stageHeight = zoom.stage.clientHeight
+  const maxX = Math.max(0, (image.width * zoom.scale - stageWidth) / 2)
+  const maxY = Math.max(0, (image.height * zoom.scale - stageHeight) / 2)
+
+  zoom.x = Math.min(maxX, Math.max(-maxX, zoom.x))
+  zoom.y = Math.min(maxY, Math.max(-maxY, zoom.y))
+}
+
+/**
+ * 高倍缩放时，画面移动一屏幕仍需要很大的指针位移。
+ * 随倍率把拖动速度从 1x 平滑提高到 3x，800% 时可以更快到达图片边缘。
+ */
+function panFactorForScale(scale) {
+  const progress = Math.min(1, Math.max(0, (scale - 1) / (ZOOM_MAX - 1)))
+  return 1 + progress * (PAN_MAX_FACTOR - 1)
+}
+
+function applyZoom() {
+  if (!zoom.el) return
+  clampZoomPan()
+  zoom.el.style.transform = `translate(${zoom.x}px, ${zoom.y}px) scale(${zoom.scale})`
+  $('#zoom-level').textContent = `${Math.round(zoom.scale * 100)}%`
+  zoom.el.classList.toggle('is-zoomed', zoom.scale > 1)
+  $('#zoom-out').disabled = zoom.scale <= ZOOM_MIN + 0.001
+  $('#zoom-in').disabled = zoom.scale >= ZOOM_MAX - 0.001
+}
+
+function resetZoom() {
+  zoom.scale = 1
+  zoom.x = 0
+  zoom.y = 0
+  zoom.el = null
+  zoom.stage = null
+  $('#zoom-level').textContent = '100%'
+  $('#zoom-controls').hidden = true
+}
+
+/**
+ * 以某个点为锚点缩放到目标倍数。
+ *
+ * 关键是「锚点不动」：鼠标指着的那块图像，缩放前后应该还在指针下面。
+ * 设锚点相对中心的位置是 p，当前平移是 x，那么指针下那块图在图像坐标系里的
+ * 位置是 (p - x) / scale。缩放后要让它仍停在 p：
+ *   p = 新x + (p - 旧x) / 旧scale * 新scale
+ * 整理得  新x = p - (p - 旧x) * (新scale / 旧scale)
+ */
+function zoomTo(nextScale, anchorX = 0, anchorY = 0) {
+  if (!zoom.el) return
+  const next = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, nextScale))
+  if (Math.abs(next - zoom.scale) < 0.001) return
+
+  const ratio = next / zoom.scale
+  zoom.x = anchorX - (anchorX - zoom.x) * ratio
+  zoom.y = anchorY - (anchorY - zoom.y) * ratio
+  zoom.scale = next
+
+  // 回到适应窗口或更小时把位移清零，免得图片停在偏心的位置
+  if (next <= 1) {
+    zoom.x = 0
+    zoom.y = 0
+  }
+  applyZoom()
+}
+
+/**
+ * 给灯箱里的图片挂上缩放交互：
+ *   滚轮      缩放（以指针为锚点）
+ *   双击      在 1x 与 2.5x 之间切换
+ *   拖动      放大后拖拽平移
+ *   双指捏合  触屏缩放
+ */
+function setupImageZoom(img) {
+  const stage = img.parentElement
+  if (!stage) return
+  zoom.el = img
+  zoom.stage = stage
+  zoom.scale = 1
+  zoom.x = 0
+  zoom.y = 0
+  applyZoom()
+  requestAnimationFrame(() => stage.focus({ preventScroll: true }))
+
+  const centerOf = () => {
+    const rect = stage.getBoundingClientRect()
+    return { cx: rect.left + rect.width / 2, cy: rect.top + rect.height / 2 }
+  }
+
+  stage.addEventListener('wheel', (event) => {
+    event.preventDefault()
+    const { cx, cy } = centerOf()
+    const factor = event.deltaY < 0 ? 1.2 : 1 / 1.2
+    zoomTo(zoom.scale * factor, event.clientX - cx, event.clientY - cy)
+  }, { passive: false })
+
+  stage.addEventListener('dblclick', (event) => {
+    if (zoom.scale > 1) {
+      zoomTo(1)
+      return
+    }
+    const { cx, cy } = centerOf()
+    zoomTo(2.5, event.clientX - cx, event.clientY - cy)
+  })
+
+  // 用 Pointer Events 统一处理鼠标和触屏，省掉两套代码
+  const pointers = new Map()
+  let dragging = false
+  let lastPointerX = 0
+  let lastPointerY = 0
+  let pinchStart = 0
+  let pinchBase = 1
+
+  const pinchDistance = () => {
+    const [a, b] = [...pointers.values()]
+    return Math.hypot(a.x - b.x, a.y - b.y)
+  }
+
+  stage.addEventListener('pointerdown', (event) => {
+    pointers.set(event.pointerId, { x: event.clientX, y: event.clientY })
+
+    if (pointers.size === 2) {
+      // 进入捏合模式
+      pinchStart = pinchDistance()
+      pinchBase = zoom.scale
+      dragging = false
+    } else if (pointers.size === 1) {
+      // 无论当前是否放大都捕获指针，保证双指手势不会在中途丢失
+      stage.setPointerCapture(event.pointerId)
+      lastPointerX = event.clientX
+      lastPointerY = event.clientY
+      if (zoom.scale > 1) {
+        dragging = true
+        stage.classList.add('is-dragging')
+      }
+    }
+  })
+
+  stage.addEventListener('pointermove', (event) => {
+    if (!pointers.has(event.pointerId)) return
+    pointers.set(event.pointerId, { x: event.clientX, y: event.clientY })
+
+    if (pointers.size === 2 && pinchStart > 0) {
+      const [a, b] = [...pointers.values()]
+      const rect = stage.getBoundingClientRect()
+      const cx = rect.left + rect.width / 2
+      const cy = rect.top + rect.height / 2
+      zoomTo(
+        pinchBase * (pinchDistance() / pinchStart),
+        (a.x + b.x) / 2 - cx,
+        (a.y + b.y) / 2 - cy,
+      )
+      return
+    }
+    if (!dragging) return
+
+    const dx = event.clientX - lastPointerX
+    const dy = event.clientY - lastPointerY
+    lastPointerX = event.clientX
+    lastPointerY = event.clientY
+    if (!dx && !dy) return
+
+    const factor = panFactorForScale(zoom.scale)
+    zoom.x += dx * factor
+    zoom.y += dy * factor
+    applyZoom()
+  })
+
+  const endPointer = (event) => {
+    pointers.delete(event.pointerId)
+    if (stage.hasPointerCapture(event.pointerId)) stage.releasePointerCapture(event.pointerId)
+    if (pointers.size < 2) pinchStart = 0
+    if (pointers.size === 0) {
+      dragging = false
+      stage.classList.remove('is-dragging')
+    }
+  }
+
+  stage.addEventListener('pointerup', endPointer)
+  stage.addEventListener('pointercancel', endPointer)
+}
+
+/* ───────────────────────────── 音乐播放器 ───────────────────────────── */
+
+/** 把秒数格式化成播放器里常见的 mm:ss / h:mm:ss。 */
+function formatPlaybackTime(seconds) {
+  if (!Number.isFinite(seconds) || seconds < 0) return '--:--'
+  const total = Math.floor(seconds)
+  const h = Math.floor(total / 3600)
+  const m = Math.floor((total % 3600) / 60)
+  const s = total % 60
+  return h > 0
+    ? `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+    : `${m}:${String(s).padStart(2, '0')}`
+}
+
+/**
+ * 音乐灯箱使用自己的播放控件，不依赖各浏览器长得不一样的 <audio controls>。
+ * 同时保留原生 audio 元素负责解码与播放，并显式处理格式不支持的错误。
+ */
+function setupAudioPlayer(container) {
+  const audio = $('.audio-element', container)
+  if (!audio) return
+
+  const seek = $('.audio-seek', container)
+  const volume = $('.audio-volume input', container)
+  const currentLabel = $('[data-audio-current]', container)
+  const durationLabel = $('[data-audio-duration]', container)
+  const toggles = $$('[data-audio-toggle]', container)
+  const symbols = $$('[data-audio-symbol]', container)
+  const toggleLabels = $$('[data-audio-toggle-label]', container)
+  const errorBox = $('.audio-error', container)
+
+  const PLAY_ICON = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5.2v13.6L19 12z"/></svg>'
+  const PAUSE_ICON = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 5h4v14H7zM13 5h4v14h-4z"/></svg>'
+
+  const applyPlayState = (playing) => {
+    symbols.forEach((node) => { node.innerHTML = playing ? PAUSE_ICON : PLAY_ICON })
+    toggles.forEach((node) => {
+      node.setAttribute('aria-label', playing ? '暂停' : '播放')
+      node.setAttribute('aria-pressed', String(playing))
+    })
+    toggleLabels.forEach((node) => { node.textContent = playing ? '暂停' : '播放' })
+    container.classList.toggle('is-playing', playing)
+  }
+
+  const syncPlayState = () => {
+    applyPlayState(!audio.paused && !audio.ended)
+  }
+
+  const syncProgress = () => {
+    const duration = audio.duration
+    const ratio = Number.isFinite(duration) && duration > 0
+      ? Math.min(1, Math.max(0, audio.currentTime / duration))
+      : 0
+    seek.value = String(Math.round(ratio * 1000))
+    currentLabel.textContent = formatPlaybackTime(audio.currentTime)
+    durationLabel.textContent = formatPlaybackTime(duration)
+  }
+
+  let progressTimer = 0
+  const stopProgressTimer = () => {
+    clearInterval(progressTimer)
+    progressTimer = 0
+  }
+  const startProgressTimer = () => {
+    stopProgressTimer()
+    syncProgress()
+    // timeupdate 在不同浏览器里的频率差异很大，补一个轻量定时器让进度条稳定更新
+    progressTimer = setInterval(syncProgress, 250)
+  }
+
+  const startPlayback = () => {
+    const playback = audio.play()
+    // 部分内嵌浏览器不派发 play 事件；先按用户意图显示播放状态，
+    // 如果浏览器随后拒绝自动播放，再在 catch 里恢复成播放按钮。
+    applyPlayState(true)
+    startProgressTimer()
+    if (playback && typeof playback.then === 'function') {
+      playback.then(() => {
+        syncPlayState()
+        if (!audio.paused) startProgressTimer()
+      }).catch(() => {
+        stopProgressTimer()
+        applyPlayState(false)
+      })
+    }
+  }
+
+  const toggle = () => {
+    if (audio.paused || audio.ended) {
+      startPlayback()
+    } else {
+      audio.pause()
+      stopProgressTimer()
+      syncPlayState()
+    }
+  }
+
+  toggles.forEach((node) => node.addEventListener('click', toggle))
+  audio.addEventListener('play', () => {
+    syncPlayState()
+    startProgressTimer()
+  })
+  audio.addEventListener('pause', () => {
+    syncPlayState()
+    stopProgressTimer()
+  })
+  audio.addEventListener('ended', () => {
+    syncPlayState()
+    stopProgressTimer()
+  })
+  audio.addEventListener('loadedmetadata', () => {
+    errorBox.hidden = true
+    syncProgress()
+  })
+  audio.addEventListener('durationchange', syncProgress)
+  audio.addEventListener('timeupdate', syncProgress)
+  audio.addEventListener('error', () => {
+    errorBox.hidden = false
+    errorBox.textContent = '当前浏览器无法播放这个音频格式，请下载后用本地播放器打开。'
+    container.classList.add('has-error')
+  })
+
+  seek.addEventListener('input', () => {
+    if (!Number.isFinite(audio.duration) || audio.duration <= 0) return
+    audio.currentTime = (Number(seek.value) / 1000) * audio.duration
+    syncProgress()
+  })
+
+  volume.addEventListener('input', () => {
+    audio.volume = Number(volume.value) / 100
+  })
+
+  audio.volume = Number(volume.value) / 100
+  syncPlayState()
+  syncProgress()
+  startPlayback()
+}
+
+/* ───────────────────────────── 灯箱容器 ───────────────────────────── */
 
 function openLightbox(id) {
   const record = state.files.find((row) => row.id === id)
@@ -736,15 +1281,60 @@ function openLightbox(id) {
   state.lightboxId = id
 
   const raw = apiUrl(`/api/files/${record.id}/raw`)
+  const inTrash = Boolean(record.deletedAt)
+
   $('#lightbox-name').textContent = record.name
-  $('#lightbox-sub').textContent = `${CATEGORY_LABEL[record.category]} · ${formatSize(record.size)} · ${formatDate(record.createdAt)}`
+  $('#lightbox-sub').textContent = inTrash
+    ? `${CATEGORY_LABEL[record.category]} · ${formatSize(record.size)} · ${trashRemainText(record)}`
+    : `${CATEGORY_LABEL[record.category]} · ${formatSize(record.size)} · ${formatDate(record.createdAt)}`
   $('#lightbox-download').href = apiUrl(`/api/files/${record.id}/download`)
 
+  // 回收站里：显示「恢复」，删除按钮改成「彻底删除」
+  $('#lightbox-restore').hidden = !inTrash
+  $('#lightbox-delete').textContent = inTrash ? '彻底删除' : '删除'
+
+  resetZoom()
   const body = $('#lightbox-body')
+  body.classList.toggle('is-media-preview', record.category === 'image' || record.category === 'video')
+
   if (record.category === 'image') {
-    body.innerHTML = `<img src="${raw}" alt="${escapeHtml(record.name)}">`
+    // stage 负责接收指针事件，img 完整适配预览区后再做缩放和平移
+    body.innerHTML = `<div class="zoom-stage" tabindex="0" role="group" aria-label="图片预览，可滚轮、双指或双击缩放">
+        <img class="zoom-img" src="${raw}" alt="${escapeHtml(record.name)}" draggable="false">
+      </div>`
+    $('#zoom-controls').hidden = false
+    setupImageZoom($('.zoom-img', body))
   } else if (record.category === 'video') {
     body.innerHTML = `<video src="${raw}" controls autoplay playsinline></video>`
+  } else if (record.category === 'music') {
+    body.innerHTML = `<div class="audio-preview" data-audio-player>
+        <button class="audio-art" type="button" data-audio-toggle aria-label="播放">
+          <svg class="audio-note" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M9 17.5V5.2l11-1.9v12.3"/><circle cx="6.2" cy="17.6" r="2.8"/><circle cx="17.2" cy="15.7" r="2.8"/>
+          </svg>
+          <span class="audio-art-play" data-audio-symbol></span>
+        </button>
+        <div class="audio-copy">
+          <p class="audio-name">${escapeHtml(record.name)}</p>
+          <span class="audio-kind">音乐 · 在线播放</span>
+        </div>
+        <div class="audio-progress">
+          <span data-audio-current>0:00</span>
+          <input class="audio-seek" type="range" min="0" max="1000" value="0" step="1" aria-label="播放进度">
+          <span data-audio-duration>--:--</span>
+        </div>
+        <div class="audio-controls">
+          <button class="audio-toggle-main" type="button" data-audio-toggle aria-label="播放">
+            <span data-audio-symbol></span><b data-audio-toggle-label>播放</b>
+          </button>
+          <label class="audio-volume">音量
+            <input type="range" min="0" max="100" value="85" step="1" aria-label="音量">
+          </label>
+        </div>
+        <audio class="audio-element" src="${raw}" preload="metadata"></audio>
+        <p class="audio-error" hidden></p>
+      </div>`
+    setupAudioPlayer($('.audio-preview', body))
   } else {
     body.innerHTML = `<div class="file-preview">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M13.5 3.5H7A2.5 2.5 0 0 0 4.5 6v12A2.5 2.5 0 0 0 7 20.5h10A2.5 2.5 0 0 0 19.5 18V9.5z"/><path d="M13.5 3.5v6h6"/></svg>
@@ -759,20 +1349,95 @@ function openLightbox(id) {
 function closeLightbox() {
   const box = $('#lightbox')
   if (box.hidden) return
+  // 先暂停再清空，确保音频进度定时器和播放状态一起结束
+  const playingMedia = $('#lightbox-body audio, #lightbox-body video')
+  if (playingMedia) playingMedia.pause()
   $('#lightbox-body').innerHTML = ''
+  $('#lightbox-body').classList.remove('is-media-preview')
+  resetZoom()
   box.hidden = true
   state.lightboxId = null
   document.body.style.overflow = ''
 }
 
+/** 把界面切到回收站视图，并同步侧栏的选中状态。 */
+function enterTrashView() {
+  state.trash = true
+  state.category = 'all'
+  state.query = ''
+  $('#search-input').value = ''
+  $$('#cat-list .cat-item').forEach((item) => item.classList.remove('is-active'))
+  $('#trash-btn').classList.add('is-active')
+}
+
+async function openTrashView({ silent = false } = {}) {
+  enterTrashView()
+  await refresh({ silent })
+}
+
+/**
+ * 删除 = 移入回收站，并立即打开回收站视图。
+ * 服务端只是打个时间戳，文件还在，24 小时内都能捞回来。
+ */
 async function deleteFile(id) {
   const record = state.files.find((row) => row.id === id)
   if (!record) return
-  if (!window.confirm(`确定删除「${record.name}」吗？此操作不可恢复。`)) return
+  if (!window.confirm(`把「${record.name}」移到回收站？\n\n24 小时内可以恢复，之后会自动清除。`)) return
+
   try {
     await api(`/api/files/${id}`, { method: 'DELETE' })
     if (state.lightboxId === id) closeLightbox()
-    notify(`已删除「${record.name}」`, 'ok')
+    notify(`已移入回收站：${record.name}`, 'ok')
+    // 删除后直接展示回收站，用户可以立刻确认文件确实在里面，也能马上恢复
+    await openTrashView({ silent: true })
+  } catch (error) {
+    notify(error.message)
+  }
+}
+
+/** 从回收站恢复。 */
+async function restoreFile(id) {
+  const record = state.files.find((row) => row.id === id)
+  if (!record) return
+
+  try {
+    await api(`/api/files/${id}/restore`, { method: 'POST' })
+    if (state.lightboxId === id) closeLightbox()
+    notify(`已恢复：${record.name}`, 'ok')
+    await refresh({ silent: true })
+  } catch (error) {
+    notify(error.message)
+  }
+}
+
+/**
+ * 彻底删除 —— 这个真的不可恢复，所以要二次确认。
+ * 确认框里把文件名带上，避免误删旁边的文件。
+ */
+async function purgeFile(id) {
+  const record = state.files.find((row) => row.id === id)
+  if (!record) return
+  if (!window.confirm(`彻底删除「${record.name}」？\n\n此操作不可恢复，文件会立即从磁盘移除。`)) return
+
+  try {
+    await api(`/api/trash/${id}`, { method: 'DELETE' })
+    if (state.lightboxId === id) closeLightbox()
+    notify(`已彻底删除：${record.name}`, 'ok')
+    await refresh({ silent: true })
+  } catch (error) {
+    notify(error.message)
+  }
+}
+
+/** 清空回收站。 */
+async function emptyTrash() {
+  const total = state.total
+  if (!total) return
+  if (!window.confirm(`清空回收站？\n\n其中 ${total} 个文件会被立即彻底删除，不可恢复。`)) return
+
+  try {
+    const result = await api('/api/trash', { method: 'DELETE' })
+    notify(`已清空回收站，删除 ${result.removed} 个文件`, 'ok')
     await refresh({ silent: true })
   } catch (error) {
     notify(error.message)
@@ -787,9 +1452,21 @@ function bindApp() {
     const btn = event.target.closest('[data-cat]')
     if (!btn) return
     state.category = btn.dataset.cat
+    state.trash = false                       // 从回收站切回普通列表
+    $('#trash-btn').classList.remove('is-active')
     $$('#cat-list .cat-item').forEach((item) => item.classList.toggle('is-active', item === btn))
     refresh()
   })
+
+  // 回收站入口：独立视图，进去时清空搜索词，避免带着别的条件看
+  $('#trash-btn').addEventListener('click', () => openTrashView())
+
+  $('#empty-trash-btn').addEventListener('click', emptyTrash)
+
+  // 图片缩放按钮
+  $('#zoom-in').addEventListener('click', () => zoomTo(zoom.scale * 1.3))
+  $('#zoom-out').addEventListener('click', () => zoomTo(zoom.scale / 1.3))
+  $('#zoom-reset').addEventListener('click', () => zoomTo(1))
 
   // 排序
   $('#sort-select').addEventListener('change', (event) => {
@@ -824,14 +1501,18 @@ function bindApp() {
 
   // 拖拽上传
   let dragDepth = 0
+  let lastDropSignature = ''
+  let lastDropAt = 0
   const overlay = $('#drop-overlay')
   window.addEventListener('dragenter', (event) => {
-    if (!state.user || !event.dataTransfer || !Array.from(event.dataTransfer.types || []).includes('Files')) return
+    if (!state.user || !isExternalFileDrag(event.dataTransfer)) return
     dragDepth += 1
     overlay.hidden = false
   })
   window.addEventListener('dragover', (event) => {
-    if (!overlay.hidden) event.preventDefault()
+    if (overlay.hidden || !isExternalFileDrag(event.dataTransfer)) return
+    event.preventDefault()
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
   })
   window.addEventListener('dragleave', () => {
     dragDepth = Math.max(0, dragDepth - 1)
@@ -839,15 +1520,54 @@ function bindApp() {
   })
   window.addEventListener('drop', async (event) => {
     if (!state.user) return
+    const transfer = event.dataTransfer
+    const hasFiles = Boolean(transfer && Array.from(transfer.types || []).includes('Files'))
+
+    // 页面内部拖拽：阻止浏览器默认打开文件，但绝不触发上传
+    if (!isExternalFileDrag(transfer)) {
+      if (hasFiles) event.preventDefault()
+      dragDepth = 0
+      overlay.hidden = true
+      markInternalDragEnd()
+      return
+    }
+
     event.preventDefault()
     dragDepth = 0
     overlay.hidden = true
-    const files = event.dataTransfer && event.dataTransfer.files
-    if (files && files.length) {
-      const forced = state.category === 'all' ? null : state.category
-      await uploadFiles(files, forced)
+
+    // 同一批里名称、大小、修改时间、MIME 完全相同的文件只上传一次
+    const files = uniqueFiles(transfer && transfer.files)
+    if (!files.length) {
+      markInternalDragEnd()
+      return
     }
+
+    // 某些浏览器 / 输入设备可能把一次 drop 派发两次，短时间内按内容签名去重
+    const signature = files.map(fileSignature).join('|')
+    const now = Date.now()
+    if (signature === lastDropSignature && now - lastDropAt < 1200) {
+      markInternalDragEnd()
+      return
+    }
+    lastDropSignature = signature
+    lastDropAt = now
+
+    const forced = state.category === 'all' ? null : state.category
+    await uploadFiles(files, forced)
+    markInternalDragEnd()
   })
+
+  // dragstart 明确标记「页面内部拖拽」；图片 / 视频本身则直接禁止拖起
+  document.addEventListener('dragstart', (event) => {
+    markInternalDragStart()
+    const tag = event.target && event.target.tagName
+    if (tag === 'IMG' || tag === 'VIDEO') {
+      event.preventDefault()
+      markInternalDragEnd()
+    }
+  }, true)
+  document.addEventListener('dragend', markInternalDragEnd, true)
 
   // 卡片交互（事件委托）
   const grid = $('#file-grid')
@@ -856,6 +1576,14 @@ function bindApp() {
     if (!card) return
     if (event.target.closest('[data-delete]')) {
       deleteFile(card.dataset.id)
+      return
+    }
+    if (event.target.closest('[data-restore]')) {
+      restoreFile(card.dataset.id)
+      return
+    }
+    if (event.target.closest('[data-purge]')) {
+      purgeFile(card.dataset.id)
       return
     }
     if (event.target.closest('[data-no-open]')) return
@@ -873,8 +1601,14 @@ function bindApp() {
   $('#lightbox').addEventListener('click', (event) => {
     if (event.target.closest('[data-close]')) closeLightbox()
   })
+  $('#lightbox-restore').addEventListener('click', () => {
+    if (state.lightboxId) restoreFile(state.lightboxId)
+  })
   $('#lightbox-delete').addEventListener('click', () => {
-    if (state.lightboxId) deleteFile(state.lightboxId)
+    if (!state.lightboxId) return
+    // 在回收站里看到的是「彻底删除」，在普通列表里是「移入回收站」
+    if (state.trash) purgeFile(state.lightboxId)
+    else deleteFile(state.lightboxId)
   })
 
   // 弹窗关闭
@@ -883,14 +1617,45 @@ function bindApp() {
   })
 
   document.addEventListener('keydown', (event) => {
+    if (!$('#lightbox').hidden && zoom.el) {
+      if (event.key === '+' || event.key === '=') {
+        event.preventDefault()
+        zoomTo(zoom.scale * 1.25)
+        return
+      }
+      if (event.key === '-' || event.key === '_') {
+        event.preventDefault()
+        zoomTo(zoom.scale / 1.25)
+        return
+      }
+      if (event.key === '0') {
+        event.preventDefault()
+        zoomTo(1)
+        return
+      }
+
+      // 高倍缩放时也可以用方向键平移，每次移动预览区的 12%
+      if (zoom.scale > 1 && ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.key)) {
+        event.preventDefault()
+        const step = Math.max(40, (zoom.stage ? zoom.stage.clientWidth : 600) * 0.12)
+        if (event.key === 'ArrowLeft') zoom.x -= step
+        if (event.key === 'ArrowRight') zoom.x += step
+        if (event.key === 'ArrowUp') zoom.y -= step
+        if (event.key === 'ArrowDown') zoom.y += step
+        applyZoom()
+        return
+      }
+    }
+
     if (event.key !== 'Escape') return
     if (!$('#lightbox').hidden) closeLightbox()
     else if (!$('#password-modal').hidden) $('#password-modal').hidden = true
     else if (!$('#user-dropdown').hidden) $('#user-dropdown').hidden = true
   })
 
-  // 窗口尺寸变化时关闭灯箱里的视频播放，避免后台继续播放
+  // 窗口尺寸变化后重新套用缩放边界；窄屏视频只保留元数据预加载，减少流量占用
   window.addEventListener('resize', () => {
+    if (zoom.el) applyZoom()
     const video = $('#lightbox-body video')
     if (video && window.innerWidth < 720) video.setAttribute('preload', 'metadata')
   })
@@ -944,6 +1709,10 @@ async function loadAuthConfig() {
  *   3. 根据回答决定显示登录页还是主界面
  */
 async function boot() {
+  // 把前端版本号写进界面，方便判断当前跑的是哪一版
+  $('#app-version').textContent = `v${APP_VERSION}`
+  $('#auth-version').textContent = `v${APP_VERSION}`
+
   // 先挂监听器。这样即使用户在数据还没加载完时就点击，也能正常响应。
   bindAuth()   // 登录/注册表单、用户菜单、修改密码弹窗
   bindApp()    // 分类切换、搜索、排序、上传、卡片点击、快捷键

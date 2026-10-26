@@ -1,6 +1,6 @@
 {
   "name": "personal-vault",
-  "version": "1.0.0",
+  "version": "1.4.2",
   "private": true,
   "description": "个人云存储 — 管理个人仓库中的视频、照片与文件",
   "type": "module",

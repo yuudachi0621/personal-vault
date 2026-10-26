@@ -32,9 +32,10 @@
   --ink: #1f1e1b;
   --ink-hover: #35342f;
 
-  /* 分类色：陶土 / 苔绿 / 沙金，自然色系 */
+  /* 分类色：陶土 / 苔绿 / 灰梅 / 沙金，自然色系 */
   --pink: #c96442;
   --violet: #6b7b6e;
+  --plum: #9a7b8c;
   --amber: #b9a67a;
 
   --danger: #b4452f;
@@ -255,6 +256,11 @@ a { color: inherit; text-decoration: none; }
 .dropdown-item.is-danger { color: var(--danger); }
 .dropdown-item.is-danger:hover { background: #fbf0ed; }
 
+/* 版本号：用于判断当前部署的是哪一版 */
+.dropdown-foot { padding: 8px 12px 4px; margin-top: 4px; border-top: 1px solid var(--border); }
+.dropdown-foot span { font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.app-version { font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; letter-spacing: .02em; }
+
 /* ─────────────────────────── 布局 ─────────────────────────── */
 .layout {
   flex: 1; display: grid; grid-template-columns: 246px minmax(0, 1fr);
@@ -281,6 +287,9 @@ a { color: inherit; text-decoration: none; }
 .cat-item.is-active em { color: var(--brand-600); }
 
 .cat-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dot, var(--brand)); flex: none; }
+
+/* 回收站入口与上方分类之间的分隔线 */
+.sidebar-sep { height: 1px; background: var(--border); margin: 10px 6px; }
 
 .storage-card {
   padding: 16px; border-radius: 12px;
@@ -317,6 +326,16 @@ a { color: inherit; text-decoration: none; }
 }
 .select select:focus { border-color: var(--brand); box-shadow: var(--ring); }
 
+/* 回收站提示条 */
+.trash-banner {
+  display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  padding: 13px 16px; margin-bottom: 16px;
+  background: var(--brand-tint); border: 1px solid #eedfd5; border-radius: 12px;
+}
+.trash-banner-text { display: grid; gap: 2px; min-width: 0; flex: 1; }
+.trash-banner-text strong { font-size: 13.5px; font-weight: 500; color: var(--text); }
+.trash-banner-text span { font-size: 12.5px; color: var(--text-2); }
+
 .file-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(178px, 1fr)); gap: 16px; }
 
 .card {
@@ -346,7 +365,18 @@ a { color: inherit; text-decoration: none; }
 .card-badge i { width: 6px; height: 6px; border-radius: 50%; background: var(--brand); }
 .card-badge[data-cat="image"] i { background: var(--pink); }
 .card-badge[data-cat="video"] i { background: var(--violet); }
+.card-badge[data-cat="music"] i { background: var(--plum); }
 .card-badge[data-cat="file"] i { background: var(--amber); }
+.card-badge.is-trash { color: var(--danger); background: rgba(252, 235, 235, .94); }
+.card-badge.is-trash i { background: var(--danger); }
+
+/* 回收站里的卡片：缩略图压灰，一眼能看出「这已经不是正常文件了」 */
+.card.is-in-trash .card-thumb > img,
+.card.is-in-trash .card-thumb > video { filter: grayscale(.7) opacity(.62); }
+.card.is-in-trash .card-thumb .file-glyph { opacity: .5; }
+
+/* 音乐文件的占位图 */
+.music-glyph { color: var(--plum); }
 
 .card-play { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; }
 .card-play span {
@@ -433,7 +463,11 @@ a { color: inherit; text-decoration: none; }
 }
 .lightbox-panel {
   position: relative; z-index: 1; display: flex; flex-direction: column;
-  width: min(1080px, 100%); max-height: calc(100dvh - 48px);
+  width: min(1080px, 100%);
+  /* 必须给一个确定高度：图片预览用的是绝对定位的 zoom-stage，
+     它不贡献高度，靠 max-height 的话整个面板会塌成只剩标题栏 */
+  height: min(84dvh, 820px);
+  max-height: calc(100dvh - 48px);
   background: var(--surface); border-radius: 16px; overflow: hidden; box-shadow: var(--shadow-lg);
   animation: pop-in .22s cubic-bezier(.4, 0, .2, 1) both;
 }
@@ -447,11 +481,116 @@ a { color: inherit; text-decoration: none; }
 .lightbox-meta span { font-size: 12px; color: var(--muted); }
 .lightbox-tools { display: flex; align-items: center; gap: 8px; }
 .lightbox-body { flex: 1; min-height: 0; display: grid; place-items: center; background: var(--bg-soft); overflow: auto; }
-.lightbox-body img { max-width: 100%; max-height: calc(100dvh - 150px); display: block; }
-.lightbox-body video { max-width: 100%; max-height: calc(100dvh - 150px); display: block; background: #171614; }
+.lightbox-body.is-media-preview { overflow: hidden; }
+.lightbox-body video {
+  position: absolute; top: 10px; left: 10px;
+  width: calc(100% - 20px); height: calc(100% - 20px);
+  max-width: none; max-height: none;
+  object-fit: contain; display: block; background: transparent;
+}
 .lightbox-body .file-preview { display: grid; place-items: center; gap: 14px; padding: 64px 32px; text-align: center; }
 .lightbox-body .file-preview svg { width: 58px; height: 58px; color: var(--muted); }
 .lightbox-body .file-preview p { margin: 0; font-size: 13.5px; color: var(--muted); }
+
+/* ── 图片缩放 ──────────────────────────────────────────────────────────
+   stage 负责接收指针事件和裁切画面，img 用 object-fit: contain 完整显示，
+   再通过 transform 完成缩放与平移。
+   touch-action: none 是关键 —— 不让浏览器把双指手势当成页面缩放。 */
+.lightbox-body { position: relative; }
+.zoom-stage {
+  position: absolute; inset: 0;
+  display: grid; place-items: center; overflow: hidden;
+  touch-action: none; cursor: default; outline: none;
+}
+.zoom-stage:focus-visible { box-shadow: inset 0 0 0 2px var(--brand); }
+.zoom-stage.is-zoomed { cursor: grab; }
+.zoom-stage.is-dragging,
+.zoom-stage.is-dragging .zoom-img { cursor: grabbing; }
+.zoom-img {
+  position: absolute; top: 10px; left: 10px;
+  width: calc(100% - 20px); height: calc(100% - 20px);
+  max-width: none; max-height: none;
+  object-fit: contain; pointer-events: none;
+  transform-origin: center center;
+  user-select: none; -webkit-user-drag: none;
+  transition: transform .14s ease-out;
+}
+.zoom-stage.is-zoomed .zoom-img { transition: none; }
+.zoom-controls {
+  display: inline-flex; align-items: center; gap: 2px; padding: 2px;
+  background: var(--bg-soft); border-radius: 8px;
+}
+.zoom-controls button {
+  display: grid; place-items: center; min-width: 30px; height: 28px; padding: 0 7px;
+  border-radius: 6px; color: var(--text-2);
+  font-size: 12px; font-variant-numeric: tabular-nums;
+  transition: background .14s, color .14s, opacity .14s;
+}
+.zoom-controls button:hover { background: var(--surface); color: var(--text); }
+.zoom-controls button:disabled { opacity: .34; cursor: not-allowed; }
+.zoom-controls button:disabled:hover { background: transparent; color: var(--text-2); }
+.zoom-controls svg { width: 14px; height: 14px; }
+
+/* ── 音乐预览 ────────────────────────────────────────────────────────── */
+.audio-preview {
+  display: grid; place-items: center; gap: 16px;
+  width: min(620px, 100%); padding: 38px 28px; text-align: center;
+}
+.audio-art {
+  position: relative; display: grid; place-items: center;
+  width: 144px; height: 144px; border-radius: 50%;
+  color: var(--plum); border: 1px solid #eadde4;
+  background:
+    radial-gradient(circle at center, rgba(255,255,255,.92) 0 18%, transparent 19%),
+    radial-gradient(circle at center, var(--brand-soft) 0 53%, #f2e8ed 54% 100%);
+  box-shadow: 0 18px 35px -22px rgba(86, 57, 72, .55), inset 0 0 0 9px rgba(255,255,255,.35);
+  transition: transform .18s ease, box-shadow .18s ease;
+}
+.audio-art:hover { transform: translateY(-2px); box-shadow: 0 22px 40px -22px rgba(86, 57, 72, .62), inset 0 0 0 9px rgba(255,255,255,.42); }
+.audio-art:focus-visible { outline: none; box-shadow: var(--ring), 0 18px 35px -22px rgba(86, 57, 72, .55); }
+.audio-note { width: 58px; height: 58px; opacity: .78; }
+.audio-preview.is-playing .audio-note { animation: audio-spin 9s linear infinite; }
+@keyframes audio-spin { to { transform: rotate(360deg); } }
+.audio-art-play {
+  position: absolute; right: 3px; bottom: 12px;
+  display: grid; place-items: center; width: 45px; height: 45px; border-radius: 50%;
+  color: #fff; background: var(--ink); box-shadow: 0 5px 14px rgba(31, 30, 27, .26);
+}
+.audio-art-play svg { width: 20px; height: 20px; }
+.audio-copy { display: grid; gap: 2px; min-width: 0; max-width: 100%; }
+.audio-name {
+  margin: 0; font-size: 15px; font-weight: 500; max-width: 520px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.audio-kind { font-size: 11.5px; color: var(--muted); letter-spacing: .04em; }
+.audio-progress {
+  display: grid; grid-template-columns: 38px minmax(0, 1fr) 38px; align-items: center;
+  gap: 10px; width: min(480px, 100%); color: var(--muted);
+  font-size: 11.5px; font-variant-numeric: tabular-nums;
+}
+.audio-progress span:last-child { text-align: right; }
+.audio-seek, .audio-volume input { accent-color: var(--brand); cursor: pointer; }
+.audio-seek { width: 100%; height: 20px; margin: 0; }
+.audio-controls { display: flex; align-items: center; justify-content: center; gap: 18px; }
+.audio-toggle-main {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  min-width: 94px; height: 38px; padding: 0 15px; border-radius: 999px;
+  color: #fff; background: var(--ink); font-size: 13px; font-weight: 500;
+  transition: background .16s, transform .12s;
+}
+.audio-toggle-main:hover { background: var(--ink-hover); }
+.audio-toggle-main:active { transform: translateY(1px); }
+.audio-toggle-main span { display: grid; place-items: center; width: 16px; height: 16px; }
+.audio-toggle-main svg { width: 16px; height: 16px; }
+.audio-volume { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+.audio-volume input { width: 86px; }
+.audio-element { display: none; }
+.audio-error {
+  max-width: 470px; margin: 0; padding: 9px 12px; border-radius: 8px;
+  color: var(--danger); background: #fbf0ed; font-size: 12.5px;
+}
+.audio-preview.has-error .audio-progress,
+.audio-preview.has-error .audio-controls { display: none; }
 
 .modal { place-items: center; padding: 24px; }
 .modal-panel {
@@ -499,7 +638,8 @@ a { color: inherit; text-decoration: none; }
 
 @media (max-width: 900px) {
   .layout { grid-template-columns: minmax(0, 1fr); gap: 16px; padding: 16px; }
-  .sidebar { position: static; }
+  .sidebar { position: static; gap: 8px; }
+  .sidebar-sep { display: none; }
   .cat-list {
     grid-auto-flow: column; grid-auto-columns: max-content; gap: 8px;
     overflow-x: auto; padding-bottom: 4px; scrollbar-width: none;
@@ -532,8 +672,11 @@ a { color: inherit; text-decoration: none; }
   .file-grid { grid-template-columns: repeat(auto-fill, minmax(142px, 1fr)); gap: 12px; }
   .toolbar-title h2 { font-size: 19px; }
   .lightbox { padding: 10px; }
-  .lightbox-panel { max-height: calc(100dvh - 20px); border-radius: 12px; }
-  .lightbox-body img, .lightbox-body video { max-height: calc(100dvh - 170px); }
+  .lightbox-panel { height: calc(100dvh - 20px); max-height: calc(100dvh - 20px); border-radius: 12px; }
+  .lightbox-body video, .zoom-img {
+    top: 6px; left: 6px;
+    width: calc(100% - 12px); height: calc(100% - 12px);
+  }
 }
 
 @media (max-width: 420px) {

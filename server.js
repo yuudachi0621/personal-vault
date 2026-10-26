@@ -39,7 +39,7 @@
  */
 
 import http from 'node:http'                                   // Node 自带的 HTTP 模块
-import { handleApi } from './lib/api.js'                       // 处理 /api/** 接口请求
+import { handleApi, startTrashSweeper } from './lib/api.js'      // 处理 /api/** 接口请求
 import { serveStatic } from './lib/static.js'                  // 返回前端静态文件
 import { applyCors, handlePreflight, corsSummary } from './lib/cors.js'  // 跨域支持
 import {
@@ -183,6 +183,10 @@ server.listen(PORT, HOST, () => {
 
   const stats = databaseStats()
   console.log(`  数据库：${stats.users} 个用户 · ${stats.files} 条文件记录`)
+
+  // 启动回收站的定时清扫（启动时先扫一次，之后每 10 分钟一次）
+  startTrashSweeper()
+  console.log('  回收站：删除的文件保留 24 小时，超时自动清除')
 })
 
 // 三十秒？不，是 30 分钟。允许传大文件，但也给一个绝对上限，

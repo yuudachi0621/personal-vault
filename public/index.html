@@ -51,11 +51,11 @@
         <span class="brand-name">个人云存储</span>
       </div>
       <h1>你的私人仓库，<br>一处安放所有素材。</h1>
-      <p class="auth-sub">视频、照片、文档统一归档，随手取用。</p>
+      <p class="auth-sub">视频、照片、音乐、文档统一归档，随手取用。</p>
       <ul class="auth-points">
-        <li><b>分类归档</b><span>自动识别视频、照片与普通文件</span></li>
+        <li><b>分类归档</b><span>自动识别视频、照片、音乐与普通文件</span></li>
         <li><b>账号隔离</b><span>每个账号只能看到自己的内容</span></li>
-        <li><b>随传随下</b><span>支持大文件流式上传与断点拖动播放</span></li>
+        <li><b>随传随下</b><span>删除先进回收站，24 小时内可恢复</span></li>
         <li><b>多端适配</b><span>手机、平板、桌面同一套界面</span></li>
       </ul>
     </aside>
@@ -106,7 +106,7 @@
           <button class="btn btn-primary btn-block" type="submit">创建账号</button>
         </form>
 
-        <p class="auth-foot">账号仅用于区分各自的存储空间，密码经加盐哈希后保存。</p>
+        <p class="auth-foot">账号仅用于区分各自的存储空间，密码经加盐哈希后保存。<br><span class="app-version" id="auth-version">v—</span></p>
       </div>
     </main>
   </div>
@@ -160,6 +160,7 @@
             </div>
             <button class="dropdown-item" type="button" id="open-password">修改密码</button>
             <button class="dropdown-item is-danger" type="button" id="logout-btn">退出登录</button>
+            <div class="dropdown-foot"><span id="app-version">v—</span></div>
           </div>
         </div>
       </div>
@@ -198,6 +199,16 @@
             </svg>
             <span>视频</span><em data-count="video">0</em>
           </button>
+          <button class="cat-item" type="button" data-cat="music">
+            <span class="cat-dot" style="--dot:#9a7b8c"></span>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"
+              stroke-linejoin="round" aria-hidden="true">
+              <path d="M9 17.5V5.2l11-1.9v12.3" />
+              <circle cx="6.2" cy="17.6" r="2.8" />
+              <circle cx="17.2" cy="15.7" r="2.8" />
+            </svg>
+            <span>音乐</span><em data-count="music">0</em>
+          </button>
           <button class="cat-item" type="button" data-cat="file">
             <span class="cat-dot" style="--dot:#b9a67a"></span>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"
@@ -209,18 +220,37 @@
           </button>
         </nav>
 
+        <!-- 回收站：与上面的分类分开放，它是另一个视图而不是一种类型 -->
+        <div class="sidebar-sep"></div>
+        <nav class="cat-list">
+          <button class="cat-item" type="button" id="trash-btn">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"
+              stroke-linejoin="round" aria-hidden="true">
+              <path d="M4 6.5h16" />
+              <path d="M18 6.5V19a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V6.5" />
+              <path d="M9.5 6.5V5a2 2 0 0 1 2-2h1a2 2 0 0 1 2 2v1.5" />
+              <path d="M10 10.5v6M14 10.5v6" />
+            </svg>
+            <span>回收站</span><em id="trash-count">0</em>
+          </button>
+        </nav>
+
         <div class="storage-card">
           <div class="storage-head"><span>存储用量</span></div>
           <div class="storage-value" id="storage-value">0 B</div>
           <div class="storage-bar">
             <i style="--w:0%;--c:#c96442" data-bar="image"></i>
             <i style="--w:0%;--c:#6b7b6e" data-bar="video"></i>
+            <i style="--w:0%;--c:#9a7b8c" data-bar="music"></i>
             <i style="--w:0%;--c:#b9a67a" data-bar="file"></i>
+            <i style="--w:0%;--c:#b4452f" data-bar="trash" hidden></i>
           </div>
           <ul class="storage-legend">
             <li><span class="cat-dot" style="--dot:#c96442"></span>照片 <b data-size="image">0 B</b></li>
             <li><span class="cat-dot" style="--dot:#6b7b6e"></span>视频 <b data-size="video">0 B</b></li>
+            <li><span class="cat-dot" style="--dot:#9a7b8c"></span>音乐 <b data-size="music">0 B</b></li>
             <li><span class="cat-dot" style="--dot:#b9a67a"></span>文件 <b data-size="file">0 B</b></li>
+            <li id="storage-trash-row" hidden><span class="cat-dot" style="--dot:#b4452f"></span>回收站 <b data-size="trash">0 B</b></li>
           </ul>
         </div>
       </aside>
@@ -252,6 +282,15 @@
           <div class="skel-card"></div>
           <div class="skel-card"></div>
           <div class="skel-card"></div>
+        </div>
+
+        <!-- 回收站提示条，只在回收站视图显示 -->
+        <div class="trash-banner" id="trash-banner" hidden>
+          <div class="trash-banner-text">
+            <strong>文件会保留 24 小时</strong>
+            <span>回收站里的内容到期自动清除，期间可以随时恢复。</span>
+          </div>
+          <button class="btn btn-ghost btn-sm is-danger" type="button" id="empty-trash-btn">清空回收站</button>
         </div>
 
         <div id="file-grid" class="file-grid"></div>
@@ -300,6 +339,21 @@
           <span id="lightbox-sub">—</span>
         </div>
         <div class="lightbox-tools">
+          <!-- 缩放控件：只对图片显示 -->
+          <div class="zoom-controls" id="zoom-controls" hidden>
+            <button type="button" id="zoom-out" aria-label="缩小">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                <path d="M6 12h12" />
+              </svg>
+            </button>
+            <button type="button" id="zoom-reset" aria-label="还原到适应窗口"><span id="zoom-level">100%</span></button>
+            <button type="button" id="zoom-in" aria-label="放大">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                <path d="M12 6v12M6 12h12" />
+              </svg>
+            </button>
+          </div>
+          <button class="btn btn-ghost btn-sm" id="lightbox-restore" type="button" hidden>恢复</button>
           <a class="btn btn-ghost btn-sm" id="lightbox-download" href="#" download>下载</a>
           <button class="btn btn-ghost btn-sm is-danger" id="lightbox-delete" type="button">删除</button>
           <button class="icon-btn" data-close type="button" aria-label="关闭">
