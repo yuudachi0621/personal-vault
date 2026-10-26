@@ -8,13 +8,29 @@
 |---|---|
 | 用户体系 | 邮箱 + 密码注册 / 登录 / 退出 / 修改密码 |
 | 数据隔离 | 每条记录归属服务端写入，接口按归属过滤，跨用户访问一律返回「不存在」 |
-| 分类归档 | 按 MIME 与扩展名自动归入 **照片 / 视频 / 音乐 / 文件**，也可手动指定 |
-| 上传 | 点击选择或拖拽，支持多选、进度条、重复拖拽拦截与 2GB 大文件流式写入 |
+| 分类归档 | 上传时按 MIME 与扩展名自动归入 **照片 / 视频 / 音乐 / 文件**，不受当前筛选页面影响 |
+| 上传 | 点击选择或拖拽，支持多选、进度条、SHA-256 内容去重与 2GB 大文件流式写入 |
 | 下载 | 保留原始文件名，支持 HTTP Range（视频可拖动进度条） |
 | 预览 | 图片灯箱（0.5x–8x 缩放、边界受限平移、键盘/滚轮/双指操作）、视频完整适配、自定义音乐播放器 |
 | 回收站 | 删除后自动进入回收站，24 小时内可恢复，到期自动彻底清除 |
 | 检索 | 文件名搜索（防抖）、四种排序、分类计数与含回收站的存储用量统计 |
 | 响应式 | 桌面双栏 → 平板单栏 → 手机底部操作条，逐级适配 |
+
+---
+
+### 重复文件规则
+
+- 每个用户上传时都会计算文件内容的 **SHA-256**，同一用户下内容完全相同的文件只保留一份。
+- **改名不能绕过去重**：文件名不同但内容相同，仍会返回 409 `DUPLICATE_FILE`。
+- **回收站也算重复**：如果相同文件还在回收站，会提示先去恢复或彻底删除，避免再次占用空间。
+- 老记录没有内容哈希时，不会在启动时扫描所有文件；只会在遇到同大小上传时懒计算并回填，避免拖慢服务启动。
+- 内容哈希不通过列表接口暴露给浏览器，只用于服务端去重。
+
+### 分类规则
+
+- **MP3 永远是音乐**：上传分类由服务端根据 MIME / 扩展名判断，不读取当前浏览的“文件”“音乐”等筛选状态。
+- **筛选只影响显示**：切换左侧分类只改变列表查询条件，不会改变之后上传文件的分类。
+- **历史数据自动修复**：升级后首次启动会一次性修正旧版本中误归为“文件”的照片、视频和音乐；之后通过接口手动调整的分类会被保留。
 
 ---
 
@@ -92,11 +108,11 @@ window.VAULT_CONFIG = { apiBase: 'https://api.example.com' }
 server.js               入口
 package.json            提供 "type": "module"，见下方说明
 config.example.json     配置模板（真实配置 config.json 首次启动自动生成）
-lib/                    8 个文件：config cors db paths store auth api static
+lib/                    9 个文件：config cors db paths media store auth api static
 public/                 5 个文件：index.html app.js styles.css config.js favicon.svg
 ```
 
-一共 16 个文件，约 177 KB。项目**零第三方依赖，不需要 `npm install`，也没有 `node_modules`**。
+一共 17 个文件。项目**零第三方依赖，不需要 `npm install`，也没有 `node_modules`**。
 SQLite 用的是 Node 22 内置的 `node:sqlite`，同样不需要装任何东西。
 
 > **Node 版本要求提高到 ≥ 22.5**（`node:sqlite` 从这个版本开始提供）。
@@ -172,7 +188,8 @@ server.js             HTTP 服务入口（单端口，绑定 0.0.0.0）
 lib/config.js         部署配置：跨域白名单、Cookie 策略、容量限额
 lib/cors.js           CORS 响应头与预检处理
 lib/paths.js          路径常量（单独一层，避免模块循环依赖）
-lib/db.js             SQLite 连接、建表、索引、旧数据迁移
+lib/media.js          MIME 补全与照片 / 视频 / 音乐分类规则
+lib/db.js             SQLite 连接、建表、内容哈希索引、旧数据迁移
 lib/store.js          数据访问层（所有 SQL 都集中在这里）
 lib/auth.js           scrypt 密码哈希、HMAC 会话令牌、Cookie 构造
 lib/api.js            业务接口：认证、上传、下载、列表、删除
@@ -183,7 +200,7 @@ public/app.js         前端逻辑（所有请求统一经 apiUrl() 拼地址）
 public/styles.css     样式与响应式规则
 config.json           站点配置（注册码），首次启动自动生成，不入 Git
 config.example.json   配置模板（入 Git）
-data/vault.db         SQLite 数据库（账号 + 文件索引）
+data/vault.db         SQLite 数据库（账号 + 文件索引 + SHA-256 去重指纹）
 data/uploads/         文件本体，按用户分文件夹
 data/secret.key       会话签名密钥
 ```
@@ -340,6 +357,7 @@ boot()                      // public/app.js 最后一行
       磁盘名 = 随机UUID + 安全扩展名（绝不使用用户给的文件名，防路径穿越）
       用 pipeline 边接收边写盘，内存占用恒定
       超限立刻中断并删掉半个文件
+      调用 lib/media.js 自动判断分类（MP3 → 音乐）
       写入数据库记录，其中 ownerId 由服务端填写 ← 前端伪造不了
 ```
 
@@ -409,7 +427,7 @@ if (record.ownerId !== ownerId) return null   // 是别人的 → 也当作不�
 | GET | `/api/auth/me` | 当前用户 |
 | PATCH | `/api/auth/password` | 修改密码 |
 | GET | `/api/files` | 列表（`category` / `q` / `sort` / `limit` / `offset`） |
-| POST | `/api/files/upload` | 上传（原始二进制流，`name` / `category` 走查询串） |
+| POST | `/api/files/upload` | 上传（原始二进制流，`name` 走查询串；自动分类并返回 409 `DUPLICATE_FILE` 拒绝重复内容） |
 | GET | `/api/files/:id/raw` | 内联预览（支持 Range） |
 | GET | `/api/files/:id/download` | 附件下载 |
 | PATCH | `/api/files/:id` | 重命名 / 改分类 |

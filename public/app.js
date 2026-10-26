@@ -209,7 +209,7 @@ function uniqueFiles(fileList) {
  *
  * 改动前端功能时记得同步这里和 package.json。
  */
-const APP_VERSION = '1.4.2'
+const APP_VERSION = '1.4.4'
 
 async function api(path, options = {}) {
   /**
@@ -824,11 +824,11 @@ async function loadMore() {
  * 用 Promise 包住是为了能在外面写 `await uploadOne(...)`，
  * 把回调式的写法转成顺序式的写法。
  */
-function uploadOne(file, forcedCategory) {
+function uploadOne(file) {
   return new Promise((resolve) => {
-    // 文件名要经过 URLSearchParams 编码，否则中文名会让服务器返回 400
+    // 文件名要经过 URLSearchParams 编码，否则中文名会让服务器返回 400。
+    // 分类由服务端按 MIME / 扩展名判断，避免受当前浏览分类影响。
     const params = new URLSearchParams({ name: file.name })
-    if (forcedCategory) params.set('category', forcedCategory)
 
     // 先弹一个 0% 的进度条，后面随上传实时更新
     const toast = createToast({ title: file.name, sub: `0% · ${formatSize(file.size)}` })
@@ -857,7 +857,17 @@ function uploadOne(file, forcedCategory) {
     // 请求成功返回（注意：这里指「网络层面成功」，状态码可能是 4xx/5xx）
     xhr.addEventListener('load', () => {
       if (xhr.status >= 200 && xhr.status < 300) {
-        toast.succeed(`已上传 · ${formatSize(file.size)}`)
+        // 成功提示里带上服务端最终判定的分类，避免用户误以为分类取决于当前页面
+        let categoryText = ''
+        try {
+          const body = JSON.parse(xhr.responseText)
+          if (body && body.file && CATEGORY_LABEL[body.file.category]) {
+            categoryText = `${CATEGORY_LABEL[body.file.category]} · `
+          }
+        } catch {
+          /* 响应异常不影响上传成功状态 */
+        }
+        toast.succeed(`已上传 · ${categoryText}${formatSize(file.size)}`)
         resolve(true)
         return
       }
@@ -891,7 +901,7 @@ function uploadOne(file, forcedCategory) {
 // 正在上传的文件：即使同一个文件被连续拖入两次，也不会并发上传两份。
 const activeUploadKeys = new Set()
 
-async function uploadFiles(fileList, forcedCategory) {
+async function uploadFiles(fileList) {
   const files = uniqueFiles(fileList)
   if (!files.length) return
 
@@ -902,7 +912,7 @@ async function uploadFiles(fileList, forcedCategory) {
   keys.forEach((key) => activeUploadKeys.add(key))
 
   try {
-    const results = await Promise.all(accepted.map((file) => uploadOne(file, forcedCategory)))
+    const results = await Promise.all(accepted.map((file) => uploadOne(file)))
     if (results.some(Boolean)) await refresh({ silent: true })
   } finally {
     keys.forEach((key) => activeUploadKeys.delete(key))
@@ -1553,8 +1563,7 @@ function bindApp() {
     lastDropSignature = signature
     lastDropAt = now
 
-    const forced = state.category === 'all' ? null : state.category
-    await uploadFiles(files, forced)
+    await uploadFiles(files)
     markInternalDragEnd()
   })
 

@@ -49,7 +49,11 @@ import {
   CONFIG_JUST_CREATED,
   REGISTRATION_CODE,
 } from './lib/config.js'   // 部署配置
-import { migrationResult, closeDb } from './lib/db.js'          // 数据库（顺便触发建表/迁移）
+import {
+  migrationResult,
+  mediaCategoryFixResult,
+  closeDb,
+} from './lib/db.js'   // 数据库（顺便触发建表/迁移）
 import { databaseStats } from './lib/store.js'                  // 统计信息
 
 /**
@@ -179,6 +183,10 @@ server.listen(PORT, HOST, () => {
   if (!migrationResult.skipped) {
     console.log(`  数据迁移：已从 JSON 导入 ${migrationResult.users} 个用户、${migrationResult.files} 条文件记录`)
     console.log('           旧文件已备份为 data/*.json.migrated')
+  }
+
+  if (mediaCategoryFixResult.fixed > 0) {
+    console.log(`  分类修复：已修正 ${mediaCategoryFixResult.fixed} 个历史媒体文件的分类`)
   }
 
   const stats = databaseStats()
