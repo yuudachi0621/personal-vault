@@ -5,3 +5,6 @@ data/
 
 # 本地工具产生的项目元数据，不属于代码本体
 .workbuddy/
+
+# 站点配置（含注册码），只提交 config.example.json 模板
+config.json

@@ -42,7 +42,13 @@ import http from 'node:http'                                   // Node 自带的
 import { handleApi } from './lib/api.js'                       // 处理 /api/** 接口请求
 import { serveStatic } from './lib/static.js'                  // 返回前端静态文件
 import { applyCors, handlePreflight, corsSummary } from './lib/cors.js'  // 跨域支持
-import { SERVE_STATIC, describeMode, describeRegistration } from './lib/config.js'   // 部署配置
+import {
+  SERVE_STATIC,
+  describeMode,
+  describeRegistration,
+  CONFIG_JUST_CREATED,
+  REGISTRATION_CODE,
+} from './lib/config.js'   // 部署配置
 import { migrationResult, closeDb } from './lib/db.js'          // 数据库（顺便触发建表/迁移）
 import { databaseStats } from './lib/store.js'                  // 统计信息
 
@@ -159,6 +165,15 @@ server.listen(PORT, HOST, () => {
   console.log(`  运行模式：${describeMode()}`)
   console.log(`  ${corsSummary()}`)
   console.log(`  注册策略：${describeRegistration()}`)
+
+  // 首次启动会自动生成 config.json 和随机注册码，这里把码打出来方便直接使用
+  if (CONFIG_JUST_CREATED) {
+    console.log('')
+    console.log('  已生成 config.json，本次注册码：')
+    console.log(`      ${REGISTRATION_CODE}`)
+    console.log('  把它发给要注册的人。想更换就直接改 config.json 里的 registrationCode，重启生效。')
+    console.log('')
+  }
 
   // 如果这次启动检测到了旧的 JSON 数据，说明刚做完迁移，值得明确告诉用户
   if (!migrationResult.skipped) {

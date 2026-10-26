@@ -79,7 +79,7 @@ const state = {
   total: 0,          // 当前筛选条件下共有多少条（由服务器告知）
   hasMore: false,    // 是否还有下一页
   loadingMore: false, // 是否正在加载下一页
-  requireInviteCode: false, // 服务端是否要求邀请码（决定要不要显示那个输入框）
+  requireRegistrationCode: false, // 服务端是否要求注册码（决定要不要显示那个输入框）
 }
 
 /**
@@ -317,8 +317,8 @@ function bindAuth() {
         email: form.email.value.trim(),
         nickname: form.nickname.value.trim(),
         password: form.password.value,
-        // 服务端未配置邀请码时这个字段是空的，后端会直接忽略
-        inviteCode: form.inviteCode.value.trim(),
+        // 服务端未配置注册码时这个字段是空的，后端会直接忽略
+        registrationCode: form.registrationCode.value.trim(),
       }
       const { user } = await api('/api/auth/register', {
         method: 'POST',
@@ -899,28 +899,28 @@ function bindApp() {
 /* ───────────────────────────── 启动 ───────────────────────────── */
 
 /**
- * 询问服务端：注册需不需要邀请码？
+ * 询问服务端：注册需不需要注册码？
  *
- * 为什么要问？因为邀请码是「部署时」用环境变量决定的，
+ * 为什么要问？因为注册码配在服务器的 config.json 里，
  * 前端没法提前知道自己该不该显示那个输入框。
- * 注意服务端只返回一个布尔值，不会把邀请码本身发给前端。
+ * 注意服务端只返回一个布尔值，不会把注册码本身发给前端。
  *
  * 不需要时把整个字段隐藏掉 —— 而不是显示一个空框让用户困惑。
  */
 async function loadAuthConfig() {
   try {
     const config = await api('/api/auth/config')
-    state.requireInviteCode = Boolean(config.requireInviteCode)
+    state.requireRegistrationCode = Boolean(config.requireRegistrationCode)
 
-    const field = $('#invite-field')
-    const input = $('#register-form [name="inviteCode"]')
+    const field = $('#registration-field')
+    const input = $('#register-form [name="registrationCode"]')
 
-    field.hidden = !state.requireInviteCode
+    field.hidden = !state.requireRegistrationCode
     // 需要时设成必填，让浏览器先拦一道，省一次网络往返
-    if (input) input.required = state.requireInviteCode
+    if (input) input.required = state.requireRegistrationCode
   } catch {
     // 拿不到配置就按「不需要」处理，别把注册整个卡死
-    state.requireInviteCode = false
+    state.requireRegistrationCode = false
   }
 }
 

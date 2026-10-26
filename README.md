@@ -49,7 +49,8 @@ PORT=8787 node server.js
 | `SERVE_STATIC` | 设为 `0` 则不再托管 `public/`，本进程退化为纯 API 服务 |
 | `PORT` | 监听端口，默认 `8787` |
 | `MAX_UPLOAD_BYTES` | 单文件上限，默认 2GB |
-| `INVITE_CODE` | 设置后注册必须填对邀请码。不设置则开放注册 |
+
+> 注册码不在这里 —— 它是站点自己的设置，配在 `config.json` 里，见下文「注册控制：注册码」。
 
 **2. 前端指向后端**
 
@@ -89,11 +90,12 @@ window.VAULT_CONFIG = { apiBase: 'https://api.example.com' }
 ```
 server.js               入口
 package.json            提供 "type": "module"，见下方说明
-lib/                    6 个文件：config.js cors.js store.js auth.js api.js static.js
+config.example.json     配置模板（真实配置 config.json 首次启动自动生成）
+lib/                    8 个文件：config cors db paths store auth api static
 public/                 5 个文件：index.html app.js styles.css config.js favicon.svg
 ```
 
-一共 15 个文件，约 168 KB。项目**零第三方依赖，不需要 `npm install`，也没有 `node_modules`**。
+一共 16 个文件，约 177 KB。项目**零第三方依赖，不需要 `npm install`，也没有 `node_modules`**。
 SQLite 用的是 Node 22 内置的 `node:sqlite`，同样不需要装任何东西。
 
 > **Node 版本要求提高到 ≥ 22.5**（`node:sqlite` 从这个版本开始提供）。
@@ -178,6 +180,8 @@ public/config.js      前端部署配置（apiBase）
 public/index.html     前端页面结构
 public/app.js         前端逻辑（所有请求统一经 apiUrl() 拼地址）
 public/styles.css     样式与响应式规则
+config.json           站点配置（注册码），首次启动自动生成，不入 Git
+config.example.json   配置模板（入 Git）
 data/vault.db         SQLite 数据库（账号 + 文件索引）
 data/uploads/         文件本体，按用户分文件夹
 data/secret.key       会话签名密钥
@@ -368,8 +372,8 @@ if (record.ownerId !== ownerId) return null   // 是别人的 → 也当作不�
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| POST | `/api/auth/register` | 注册并登录（设置了 `INVITE_CODE` 时需带 `inviteCode`） |
-| GET | `/api/auth/config` | 注册策略（`{ requireInviteCode }`），前端据此决定显不显示邀请码输入框 |
+| POST | `/api/auth/register` | 注册并登录（需要注册码时带 `registrationCode`） |
+| GET | `/api/auth/config` | 注册策略（`{ requireRegistrationCode }`），前端据此决定显不显示注册码输入框 |
 | POST | `/api/auth/login` | 登录 |
 | POST | `/api/auth/logout` | 退出 |
 | GET | `/api/auth/me` | 当前用户 |
@@ -419,31 +423,48 @@ if (record.ownerId !== ownerId) return null   // 是别人的 → 也当作不�
 以前没有这些限制，40G 磁盘存 20 个 4K 视频就满，写满后数据库写入失败、上传全部报错，
 表现就像服务器崩了。
 
-### 注册控制：邀请码
+### 注册控制：注册码
 
-设置环境变量即可关闭公开注册：
+注册码配在项目根目录的 **`config.json`** 里，不是环境变量：
 
-```bash
-INVITE_CODE="换成你自己的随机串" node server.js
+```json
+{
+  "registrationCode": "VAULT-QW2M-A3JW-YHH4"
+}
 ```
 
 | 情况 | 行为 |
 |---|---|
-| 不设置 `INVITE_CODE` | 开放注册，前端**不显示**邀请码输入框，行为和以前完全一样 |
-| 设置后 | 注册必须填对邀请码，否则返回 403 `INVALID_INVITE_CODE` / `INVITE_REQUIRED` |
+| `config.json` 不存在 | **首次启动自动生成**，写入一个随机注册码，并在控制台打印出来 |
+| `registrationCode` 有值 | 注册必须填对注册码，否则 403 `INVALID_REGISTRATION_CODE` / `REGISTRATION_CODE_REQUIRED` |
+| `registrationCode` 为空字符串 | 开放注册，前端**不显示**注册码输入框 |
+
+首次启动时控制台会这样提示：
+
+```
+注册策略：需要注册码才能注册
+
+已生成 config.json，本次注册码：
+    VAULT-QW2M-A3JW-YHH4
+把它发给要注册的人。想更换就直接改 config.json 里的 registrationCode，重启生效。
+```
 
 实现要点：
 
-- 邀请码存在**环境变量**里，不进数据库 —— 改它只需重启，不会随数据库泄漏而暴露。
-- 校验时**忽略首尾空格和大小写**，因为邀请码是要发给别人手输的，卡大小写很影响体验。
+- **为什么用文件而不是环境变量**：注册码属于「这个站点自己的设置」，
+  放在文件里可以直接用编辑器改，看得见、改完重启就生效，也不用记环境变量怎么拼。
+- **`config.json` 不进 Git**（已加入 `.gitignore`），仓库里只放 `config.example.json` 模板。
+- **不预置任何默认值**。首次启动随机生成，避免出现「大家都忘了改 123456」这种等于没防护的情况。
+- **解析失败直接报错退出**，而不是「当作没配置」。后者会让一个格式错的文件静默变成开放注册。
+- 校验时**忽略首尾空格和大小写**，因为注册码是要发给别人手输的，卡大小写很影响体验。
 - 校验发生在「邮箱格式检查之后、邮箱查重之前」。这个位置是有意的：
-  放在查重之后，没有邀请码的人就能靠「邮箱已注册」这个提示批量探测哪些邮箱注册过本站。
+  放在查重之后，没有注册码的人就能靠「邮箱已注册」这个提示批量探测哪些邮箱注册过本站。
 - 前端通过 `GET /api/auth/config` 拿一个布尔值来决定显不显示输入框，
-  **服务端从不把邀请码本身下发给前端**。
+  **服务端从不把注册码本身下发给前端**。
 - 已有的老账号不受影响，登录照常。
 
-> ⚠️ 邀请码的强度取决于长度。别用 `123456` 这种，建议 12 位以上随机字符串，
-> 否则可能被暴力枚举。注册接口目前没有失败次数限制，这是它的主要短板。
+> ⚠️ 注册接口没有失败次数限制，注册码理论上可被暴力枚举。
+> 自动生成的码是 12 位（约 2^60 种组合），足够安全；**手动改的话别用 `123456` 这种**。
 
 ## 改造时容易漏的点
 

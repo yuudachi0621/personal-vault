@@ -29,7 +29,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#4f46e5">
+  <meta name="theme-color" content="#faf9f5">
   <title>个人云存储 · 视频 / 照片 / 文件</title>
   <link rel="icon" href="/favicon.svg">
   <link rel="stylesheet" href="/styles.css">
@@ -97,10 +97,10 @@
             <input type="password" name="password" required minlength="6" placeholder="至少 6 位"
               autocomplete="new-password">
           </label>
-          <!-- 默认隐藏，只有服务端配置了 INVITE_CODE 时才会显示（见 app.js 的 loadAuthConfig） -->
-          <label class="field" id="invite-field" hidden>
-            <span>邀请码</span>
-            <input type="text" name="inviteCode" placeholder="向站点管理员索取" autocomplete="off" spellcheck="false">
+          <!-- 默认隐藏，只有 config.json 里配置了 registrationCode 时才显示（见 app.js 的 loadAuthConfig） -->
+          <label class="field" id="registration-field" hidden>
+            <span>注册码</span>
+            <input type="text" name="registrationCode" placeholder="向站点管理员索取" autocomplete="off" spellcheck="false">
           </label>
           <p class="form-error" data-error hidden></p>
           <button class="btn btn-primary btn-block" type="submit">创建账号</button>
@@ -179,7 +179,7 @@
             <span>全部</span><em data-count="all">0</em>
           </button>
           <button class="cat-item" type="button" data-cat="image">
-            <span class="cat-dot" style="--dot:#ec4899"></span>
+            <span class="cat-dot" style="--dot:#c96442"></span>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"
               stroke-linejoin="round" aria-hidden="true">
               <rect x="3.5" y="5" width="17" height="14" rx="2.2" />
@@ -190,7 +190,7 @@
             <span>照片</span><em data-count="image">0</em>
           </button>
           <button class="cat-item" type="button" data-cat="video">
-            <span class="cat-dot" style="--dot:#7c3aed"></span>
+            <span class="cat-dot" style="--dot:#6b7b6e"></span>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"
               stroke-linejoin="round" aria-hidden="true">
               <rect x="3" y="6" width="12.5" height="12" rx="2.2" />
@@ -199,7 +199,7 @@
             <span>视频</span><em data-count="video">0</em>
           </button>
           <button class="cat-item" type="button" data-cat="file">
-            <span class="cat-dot" style="--dot:#f59e0b"></span>
+            <span class="cat-dot" style="--dot:#b9a67a"></span>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"
               stroke-linejoin="round" aria-hidden="true">
               <path d="M13.5 3.5H7A2.5 2.5 0 0 0 4.5 6v12A2.5 2.5 0 0 0 7 20.5h10A2.5 2.5 0 0 0 19.5 18V9.5z" />
@@ -213,14 +213,14 @@
           <div class="storage-head"><span>存储用量</span></div>
           <div class="storage-value" id="storage-value">0 B</div>
           <div class="storage-bar">
-            <i style="--w:0%;--c:#ec4899" data-bar="image"></i>
-            <i style="--w:0%;--c:#7c3aed" data-bar="video"></i>
-            <i style="--w:0%;--c:#f59e0b" data-bar="file"></i>
+            <i style="--w:0%;--c:#c96442" data-bar="image"></i>
+            <i style="--w:0%;--c:#6b7b6e" data-bar="video"></i>
+            <i style="--w:0%;--c:#b9a67a" data-bar="file"></i>
           </div>
           <ul class="storage-legend">
-            <li><span class="cat-dot" style="--dot:#ec4899"></span>照片 <b data-size="image">0 B</b></li>
-            <li><span class="cat-dot" style="--dot:#7c3aed"></span>视频 <b data-size="video">0 B</b></li>
-            <li><span class="cat-dot" style="--dot:#f59e0b"></span>文件 <b data-size="file">0 B</b></li>
+            <li><span class="cat-dot" style="--dot:#c96442"></span>照片 <b data-size="image">0 B</b></li>
+            <li><span class="cat-dot" style="--dot:#6b7b6e"></span>视频 <b data-size="video">0 B</b></li>
+            <li><span class="cat-dot" style="--dot:#b9a67a"></span>文件 <b data-size="file">0 B</b></li>
           </ul>
         </div>
       </aside>
