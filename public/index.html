@@ -1,0 +1,348 @@
+<!doctype html>
+<!--
+  ══════════════════════════════════════════════════════════════════════════
+   index.html —— 页面骨架
+  ══════════════════════════════════════════════════════════════════════════
+
+   【这个文件只是「空架子」】
+     注意看下面几乎没有真实内容 —— 文件列表、用户名、用量数字全是空的，
+     需要等 app.js 跑起来后，从服务器拿到数据再填进去。
+
+     这就是单页应用（SPA）的特点：HTML 负责搭结构，JS 负责填内容。
+
+   【页面主要由四块组成】
+     1. #auth-view    未登录时显示的登录/注册页
+     2. #app-view     登录后显示的主界面（顶栏 + 侧栏 + 文件网格）
+     3. #lightbox     点开文件后的预览大图/播放器
+     4. #password-modal、#toasts  弹窗与提示条
+
+     前两块初始都带 hidden 属性（即隐藏）。到底显示哪一个，
+     由 app.js 里的 boot() 问过服务器「我登录了吗」之后决定。
+
+   【三个 script 标签的顺序不能换】
+     1. config.js  先定义后端地址（apiBase）
+     2. app.js     再读取这个地址去发请求
+     依赖关系决定了顺序，调换会导致读不到配置。
+-->
+<html lang="zh-CN">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#4f46e5">
+  <title>个人云存储 · 视频 / 照片 / 文件</title>
+  <link rel="icon" href="/favicon.svg">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+
+<body>
+
+  <!-- ══════════════════════════ 未登录：登录 / 注册 ══════════════════════════ -->
+  <div id="auth-view" class="auth" hidden>
+    <aside class="auth-brand">
+      <div class="brand-row">
+        <span class="brand-logo" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+            stroke-linejoin="round">
+            <path
+              d="M3 7.5A2.5 2.5 0 0 1 5.5 5h3.2l1.6 2h8.2A2.5 2.5 0 0 1 21 9.5v7A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5z" />
+          </svg>
+        </span>
+        <span class="brand-name">个人云存储</span>
+      </div>
+      <h1>你的私人仓库，<br>一处安放所有素材。</h1>
+      <p class="auth-sub">视频、照片、文档统一归档，随手取用。</p>
+      <ul class="auth-points">
+        <li><b>分类归档</b><span>自动识别视频、照片与普通文件</span></li>
+        <li><b>账号隔离</b><span>每个账号只能看到自己的内容</span></li>
+        <li><b>随传随下</b><span>支持大文件流式上传与断点拖动播放</span></li>
+        <li><b>多端适配</b><span>手机、平板、桌面同一套界面</span></li>
+      </ul>
+    </aside>
+
+    <main class="auth-panel">
+      <div class="auth-card">
+        <div class="seg" role="tablist">
+          <button type="button" class="seg-btn is-active" data-auth-tab="login" role="tab">登录</button>
+          <button type="button" class="seg-btn" data-auth-tab="register" role="tab">注册</button>
+        </div>
+
+        <!-- 登录 -->
+        <form id="login-form" class="auth-form" autocomplete="on">
+          <label class="field">
+            <span>邮箱</span>
+            <input type="email" name="email" required placeholder="you@example.com" autocomplete="email">
+          </label>
+          <label class="field">
+            <span>密码</span>
+            <input type="password" name="password" required minlength="6" placeholder="至少 6 位"
+              autocomplete="current-password">
+          </label>
+          <p class="form-error" data-error hidden></p>
+          <button class="btn btn-primary btn-block" type="submit">登录</button>
+        </form>
+
+        <!-- 注册 -->
+        <form id="register-form" class="auth-form" autocomplete="on" hidden>
+          <label class="field">
+            <span>邮箱</span>
+            <input type="email" name="email" required placeholder="you@example.com" autocomplete="email">
+          </label>
+          <label class="field">
+            <span>昵称</span>
+            <input type="text" name="nickname" maxlength="32" placeholder="怎么称呼你（可留空）" autocomplete="nickname">
+          </label>
+          <label class="field">
+            <span>密码</span>
+            <input type="password" name="password" required minlength="6" placeholder="至少 6 位"
+              autocomplete="new-password">
+          </label>
+          <!-- 默认隐藏，只有服务端配置了 INVITE_CODE 时才会显示（见 app.js 的 loadAuthConfig） -->
+          <label class="field" id="invite-field" hidden>
+            <span>邀请码</span>
+            <input type="text" name="inviteCode" placeholder="向站点管理员索取" autocomplete="off" spellcheck="false">
+          </label>
+          <p class="form-error" data-error hidden></p>
+          <button class="btn btn-primary btn-block" type="submit">创建账号</button>
+        </form>
+
+        <p class="auth-foot">账号仅用于区分各自的存储空间，密码经加盐哈希后保存。</p>
+      </div>
+    </main>
+  </div>
+
+  <!-- ══════════════════════════ 已登录：主应用 ══════════════════════════ -->
+  <div id="app-view" class="app" hidden>
+    <header class="topbar">
+      <div class="topbar-brand">
+        <span class="brand-logo brand-logo-sm" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+            stroke-linejoin="round">
+            <path
+              d="M3 7.5A2.5 2.5 0 0 1 5.5 5h3.2l1.6 2h8.2A2.5 2.5 0 0 1 21 9.5v7A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5z" />
+          </svg>
+        </span>
+        <span class="brand-name">个人云存储</span>
+      </div>
+
+      <label class="search">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+          aria-hidden="true">
+          <circle cx="11" cy="11" r="7" />
+          <path d="m20 20-3.5-3.5" />
+        </svg>
+        <input type="search" id="search-input" placeholder="搜索文件名…" autocomplete="off">
+      </label>
+
+      <div class="topbar-actions">
+        <button class="btn btn-primary" id="upload-btn" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+            stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5" />
+            <path d="M4 16v2.5A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5V16" />
+          </svg>
+          <span>上传</span>
+        </button>
+
+        <div class="user-menu" id="user-menu">
+          <button class="user-chip" type="button" id="user-chip" aria-haspopup="menu" aria-expanded="false">
+            <span class="avatar" id="user-avatar">U</span>
+            <span class="user-name" id="user-name">用户</span>
+            <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+              stroke-linecap="round" aria-hidden="true">
+              <path d="m6 9 6 6 6-6" />
+            </svg>
+          </button>
+          <div class="dropdown" id="user-dropdown" role="menu" hidden>
+            <div class="dropdown-head">
+              <div class="dropdown-name" id="dropdown-name">用户</div>
+              <div class="dropdown-mail" id="dropdown-mail">—</div>
+            </div>
+            <button class="dropdown-item" type="button" id="open-password">修改密码</button>
+            <button class="dropdown-item is-danger" type="button" id="logout-btn">退出登录</button>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <div class="layout">
+      <!-- 侧栏：分类 -->
+      <aside class="sidebar">
+        <nav class="cat-list" id="cat-list">
+          <button class="cat-item is-active" type="button" data-cat="all">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"
+              stroke-linejoin="round" aria-hidden="true">
+              <path
+                d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v11a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 17.5z" />
+              <path d="M4 9.5h16M9.5 9.5V20" />
+            </svg>
+            <span>全部</span><em data-count="all">0</em>
+          </button>
+          <button class="cat-item" type="button" data-cat="image">
+            <span class="cat-dot" style="--dot:#ec4899"></span>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"
+              stroke-linejoin="round" aria-hidden="true">
+              <rect x="3.5" y="5" width="17" height="14" rx="2.2" />
+              <circle cx="9" cy="10" r="1.6" />
+              <path d="m5 17 4.2-4.2a1.6 1.6 0 0 1 2.2 0L16 17.4" />
+              <path d="m14.5 15.2 1.7-1.6a1.6 1.6 0 0 1 2.2 0l1.1 1" />
+            </svg>
+            <span>照片</span><em data-count="image">0</em>
+          </button>
+          <button class="cat-item" type="button" data-cat="video">
+            <span class="cat-dot" style="--dot:#7c3aed"></span>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"
+              stroke-linejoin="round" aria-hidden="true">
+              <rect x="3" y="6" width="12.5" height="12" rx="2.2" />
+              <path d="m15.5 12 5.5-3.2v6.4L15.5 12z" />
+            </svg>
+            <span>视频</span><em data-count="video">0</em>
+          </button>
+          <button class="cat-item" type="button" data-cat="file">
+            <span class="cat-dot" style="--dot:#f59e0b"></span>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"
+              stroke-linejoin="round" aria-hidden="true">
+              <path d="M13.5 3.5H7A2.5 2.5 0 0 0 4.5 6v12A2.5 2.5 0 0 0 7 20.5h10A2.5 2.5 0 0 0 19.5 18V9.5z" />
+              <path d="M13.5 3.5v6h6" />
+            </svg>
+            <span>文件</span><em data-count="file">0</em>
+          </button>
+        </nav>
+
+        <div class="storage-card">
+          <div class="storage-head"><span>存储用量</span></div>
+          <div class="storage-value" id="storage-value">0 B</div>
+          <div class="storage-bar">
+            <i style="--w:0%;--c:#ec4899" data-bar="image"></i>
+            <i style="--w:0%;--c:#7c3aed" data-bar="video"></i>
+            <i style="--w:0%;--c:#f59e0b" data-bar="file"></i>
+          </div>
+          <ul class="storage-legend">
+            <li><span class="cat-dot" style="--dot:#ec4899"></span>照片 <b data-size="image">0 B</b></li>
+            <li><span class="cat-dot" style="--dot:#7c3aed"></span>视频 <b data-size="video">0 B</b></li>
+            <li><span class="cat-dot" style="--dot:#f59e0b"></span>文件 <b data-size="file">0 B</b></li>
+          </ul>
+        </div>
+      </aside>
+
+      <!-- 主区 -->
+      <main class="content">
+        <div class="toolbar">
+          <div class="toolbar-title">
+            <h2 id="view-title">全部</h2>
+            <span class="pill" id="view-count">0 项</span>
+          </div>
+          <div class="toolbar-tools">
+            <label class="select">
+              <span>排序</span>
+              <select id="sort-select">
+                <option value="newest">最新上传</option>
+                <option value="oldest">最早上传</option>
+                <option value="name">名称</option>
+                <option value="largest">体积从大到小</option>
+              </select>
+            </label>
+          </div>
+        </div>
+
+        <div id="skeleton" class="file-grid" hidden>
+          <div class="skel-card"></div>
+          <div class="skel-card"></div>
+          <div class="skel-card"></div>
+          <div class="skel-card"></div>
+          <div class="skel-card"></div>
+          <div class="skel-card"></div>
+        </div>
+
+        <div id="file-grid" class="file-grid"></div>
+
+        <div id="empty-state" class="empty" hidden>
+          <div class="empty-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"
+              stroke-linejoin="round">
+              <path d="M12 16V8m0 0-3 3m3-3 3 3" />
+              <circle cx="12" cy="12" r="8.5" />
+            </svg>
+          </div>
+          <h3 id="empty-title">这里还是空的</h3>
+          <p id="empty-desc">把视频、照片或文件拖进来，或点击右上角「上传」按钮。</p>
+        </div>
+
+        <!-- 分页：一次只取 60 条，需要时再加载下一页 -->
+        <div id="load-more-wrap" class="load-more" hidden>
+          <button class="btn btn-ghost" type="button" id="load-more-btn">加载更多</button>
+          <span class="load-more-hint" id="load-more-hint"></span>
+        </div>
+      </main>
+    </div>
+
+    <!-- 移动端底部操作条 -->
+    <div class="mobile-bar">
+      <button class="btn btn-primary btn-block" id="upload-btn-mobile" type="button">上传文件</button>
+    </div>
+
+    <input type="file" id="file-input" multiple hidden>
+    <div id="drop-overlay" class="drop-overlay" hidden>
+      <div class="drop-inner">
+        <strong>松开鼠标即可上传</strong>
+        <span>支持多选，自动归类到照片 / 视频 / 文件</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════ 预览灯箱 ══════════════════════════ -->
+  <div id="lightbox" class="lightbox" hidden>
+    <div class="lightbox-backdrop" data-close></div>
+    <div class="lightbox-panel" role="dialog" aria-modal="true" aria-labelledby="lightbox-name">
+      <header class="lightbox-head">
+        <div class="lightbox-meta">
+          <strong id="lightbox-name">文件名</strong>
+          <span id="lightbox-sub">—</span>
+        </div>
+        <div class="lightbox-tools">
+          <a class="btn btn-ghost btn-sm" id="lightbox-download" href="#" download>下载</a>
+          <button class="btn btn-ghost btn-sm is-danger" id="lightbox-delete" type="button">删除</button>
+          <button class="icon-btn" data-close type="button" aria-label="关闭">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+              <path d="M6 6l12 12M18 6 6 18" />
+            </svg>
+          </button>
+        </div>
+      </header>
+      <div class="lightbox-body" id="lightbox-body"></div>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════ 修改密码弹窗 ══════════════════════════ -->
+  <div id="password-modal" class="modal" hidden>
+    <div class="modal-backdrop" data-close></div>
+    <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="pwd-title">
+      <header class="modal-head">
+        <h3 id="pwd-title">修改密码</h3>
+        <button class="icon-btn" data-close type="button" aria-label="关闭">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <path d="M6 6l12 12M18 6 6 18" />
+          </svg>
+        </button>
+      </header>
+      <form id="password-form" class="modal-body">
+        <label class="field"><span>当前密码</span><input type="password" name="oldPassword" required
+            autocomplete="current-password"></label>
+        <label class="field"><span>新密码</span><input type="password" name="newPassword" required minlength="6"
+            placeholder="至少 6 位" autocomplete="new-password"></label>
+        <p class="form-error" data-error hidden></p>
+        <div class="modal-actions">
+          <button class="btn btn-ghost" type="button" data-close>取消</button>
+          <button class="btn btn-primary" type="submit">保存</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+
+  <script src="/config.js"></script>
+  <script src="/app.js"></script>
+</body>
+
+</html>

@@ -1,0 +1,7 @@
+node_modules/
+data/
+*.log
+.DS_Store
+
+# 本地工具产生的项目元数据，不属于代码本体
+.workbuddy/
