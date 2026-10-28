@@ -1,12 +1,14 @@
 {
   "name": "personal-vault",
-  "version": "1.5.3",
+  "version": "1.6.1",
   "private": true,
   "description": "个人云存储 — 管理个人仓库中的视频、照片与文件",
   "type": "module",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "preview:videos": "node scripts/optimize-video-previews.mjs --all",
+    "preview:video": "node scripts/optimize-video-previews.mjs"
   },
   "engines": {
     "node": ">=22.5"

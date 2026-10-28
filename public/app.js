@@ -83,6 +83,7 @@ const state = {
   requireRegistrationCode: false, // 服务端是否要求注册码（决定要不要显示那个输入框）
   trash: false,      // 是否处于回收站视图
   ttlMs: 24 * 60 * 60 * 1000, // 回收站保留时长（由服务器下发，前端只用来算倒计时）
+  videoQuality: '720p', // 视频播放清晰度：720p / original
 }
 
 /**
@@ -96,6 +97,11 @@ const state = {
  *   现在一次只拿 60 条，滚动到底再点「加载更多」。
  */
 const PAGE_SIZE = 60
+const VIDEO_QUALITY_KEY = 'personal-vault:video-quality'
+try {
+  const savedQuality = localStorage.getItem(VIDEO_QUALITY_KEY)
+  if (['720p', 'original'].includes(savedQuality)) state.videoQuality = savedQuality
+} catch { /* 隐私模式可能禁用 localStorage */ }
 
 /* ───────────────────────────── 通用工具 ───────────────────────────── */
 
@@ -210,7 +216,7 @@ function uniqueFiles(fileList) {
  *
  * 改动前端功能时记得同步这里和 package.json。
  */
-const APP_VERSION = '1.5.3'
+const APP_VERSION = '1.6.1'
 
 async function api(path, options = {}) {
   /**
@@ -1372,7 +1378,7 @@ function preloadAdjacentPreviews(index) {
     if (record.category === 'video' && Math.abs(distance) === 1) {
       const key = `video:${record.id}`
       if (previewPreloadCache.has(key)) continue
-      const src = apiUrl(`/api/files/${record.id}/raw`)
+      const src = apiUrl(`/api/files/${record.id}/preview`)
       const video = crossOriginPreview(document.createElement('video'), src)
       video.preload = 'metadata'
       video.muted = true
@@ -1383,14 +1389,79 @@ function preloadAdjacentPreviews(index) {
   }
 }
 
+function videoPlaybackUrl(record, quality) {
+  return quality === 'original'
+    ? apiUrl(`/api/files/${record.id}/raw`)
+    : apiUrl(`/api/files/${record.id}/preview`)
+}
+
+/** 查询 720P 播放副本是否已经生成。 */
+async function refreshVideoQualityAvailability(record) {
+  const select = $('#video-quality')
+  const option = $('option[value="720p"]', select)
+  if (!select || !option) return
+
+  option.disabled = true
+  option.textContent = '720P（检测中…）'
+  try {
+    const response = await fetch(apiUrl(`/api/files/${record.id}/preview`), {
+      method: 'HEAD',
+      credentials: 'include',
+      cache: 'no-store',
+    })
+    if (state.lightboxId !== record.id) return
+    const available = response.ok && response.headers.get('X-Video-Preview') === 'optimized'
+    option.disabled = !available
+    option.textContent = available ? '720P' : '720P（未生成）'
+    if (!available && state.videoQuality === '720p') {
+      state.videoQuality = 'original'
+      select.value = 'original'
+      try { localStorage.setItem(VIDEO_QUALITY_KEY, 'original') } catch { /* ignore */ }
+    }
+  } catch {
+    if (state.lightboxId === record.id) option.textContent = '720P（未生成）'
+  }
+}
+
+/** 切换清晰度时保留当前播放时间和播放/暂停状态。 */
+function applyVideoQuality(record, quality) {
+  const video = $('#lightbox-body video')
+  const select = $('#video-quality')
+  if (!video || !select) return
+
+  state.videoQuality = quality
+  select.value = quality
+  try { localStorage.setItem(VIDEO_QUALITY_KEY, quality) } catch { /* ignore */ }
+
+  const targetSrc = videoPlaybackUrl(record, quality)
+  if (video.dataset.baseSrc === targetSrc) {
+    video.dataset.quality = quality
+    return
+  }
+
+  const resumeAt = Number.isFinite(video.currentTime) ? video.currentTime : 0
+  const shouldResume = !video.paused && !video.ended
+  video.pause()
+  video.dataset.quality = quality
+  video.dataset.baseSrc = targetSrc
+  video.src = targetSrc
+  video.load()
+  video.addEventListener('loadedmetadata', () => {
+    try {
+      if (resumeAt > 0) video.currentTime = Math.min(resumeAt, video.duration || resumeAt)
+    } catch { /* 无法定位时从头播放 */ }
+    if (shouldResume) video.play().catch(() => {})
+  }, { once: true })
+}
+
 /** 视频缓冲或定位时给出明确状态，并在长时间卡住后自动重连一次。 */
-function setupVideoPlayer(container) {
+function setupVideoPlayer(record, container) {
   const video = $('video', container)
   const loading = $('[data-video-loading]', container)
   const loadingText = $('[data-video-loading-text]', container)
   if (!video || !loading || !loadingText) return
 
-  const originalSrc = video.getAttribute('src') || ''
+  if (!video.dataset.baseSrc) video.dataset.baseSrc = video.getAttribute('src') || ''
   let recoveryTimer = 0
   let recoveryAttempts = 0
   let recovering = false
@@ -1427,7 +1498,8 @@ function setupVideoPlayer(container) {
     showLoading('视频响应超时，正在重新连接…')
     video.pause()
 
-    const retryUrl = `${originalSrc}${originalSrc.includes('?') ? '&' : '?'}retry=${Date.now()}`
+    const baseSrc = video.dataset.baseSrc || video.getAttribute('src') || ''
+    const retryUrl = `${baseSrc}${baseSrc.includes('?') ? '&' : '?'}retry=${Date.now()}`
     video.src = retryUrl
     video.load()
     video.addEventListener('loadedmetadata', () => {
@@ -1558,6 +1630,7 @@ function openLightbox(id) {
   // 回收站里：显示「恢复」，删除按钮改成「彻底删除」
   $('#lightbox-restore').hidden = !inTrash
   $('#lightbox-delete').textContent = inTrash ? '彻底删除' : '删除'
+  $('#video-quality-control').hidden = record.category !== 'video'
 
   resetZoom()
   const body = $('#lightbox-body')
@@ -1571,14 +1644,17 @@ function openLightbox(id) {
     $('#zoom-controls').hidden = false
     setupImageZoom($('.zoom-img', body))
   } else if (record.category === 'video') {
+    const videoSrc = videoPlaybackUrl(record, state.videoQuality)
+    $('#video-quality').value = state.videoQuality
     body.innerHTML = `<div class="video-preview" data-video-player>
-        <video src="${raw}" controls autoplay preload="auto" playsinline></video>
+        <video src="${videoSrc}" data-base-src="${videoSrc}" data-quality="${state.videoQuality}" controls autoplay preload="auto" playsinline></video>
         <div class="video-loading" data-video-loading role="status" aria-live="polite">
           <span class="video-spinner" aria-hidden="true"></span>
           <span data-video-loading-text>加载视频…</span>
         </div>
       </div>`
-    setupVideoPlayer(body)
+    setupVideoPlayer(record, body)
+    void refreshVideoQualityAvailability(record)
   } else if (record.category === 'music') {
     body.innerHTML = `<div class="audio-preview" data-audio-player>
         <button class="audio-art" type="button" data-audio-toggle aria-label="播放">
@@ -1878,6 +1954,10 @@ function bindApp() {
   })
   $('#lightbox-prev').addEventListener('click', () => navigateLightbox(-1))
   $('#lightbox-next').addEventListener('click', () => navigateLightbox(1))
+  $('#video-quality').addEventListener('change', (event) => {
+    const record = state.files.find((row) => row.id === state.lightboxId)
+    if (record && record.category === 'video') applyVideoQuality(record, event.target.value)
+  })
   $('#lightbox-restore').addEventListener('click', () => {
     if (state.lightboxId) restoreFile(state.lightboxId)
   })

@@ -11,7 +11,7 @@
 | 分类归档 | 上传时按 MIME 与扩展名自动归入 **照片 / 视频 / 音乐 / 文件**，不受当前筛选页面影响 |
 | 上传 | 点击选择或拖拽，支持多选、进度条、SHA-256 内容去重与 2GB 大文件流式写入 |
 | 下载 | 保留原始文件名，支持 HTTP Range（视频可拖动进度条） |
-| 预览 | 图片灯箱（0.5x–8x 缩放、相邻预加载、左右切换）、视频 Range 快速定位与缓冲提示、自定义音乐播放器 |
+| 预览 | 图片灯箱（0.5x–8x 缩放、相邻预加载、左右切换）、视频 720P/原画切换、自定义音乐播放器 |
 | 回收站 | 删除后自动进入回收站，24 小时内可恢复，到期自动彻底清除 |
 | 检索 | 文件名搜索（防抖）、四种排序、分类计数与含回收站的存储用量统计 |
 | 响应式 | 桌面双栏 → 平板单栏 → 手机底部操作条，逐级适配 |
@@ -37,6 +37,59 @@
 - 媒体流使用独立的 3000 次/分钟限流，避免视频预缓冲和 Range 请求被普通 API 的 600 次/分钟限流误伤。
 - 预览照片时会预先加载前后各两张照片；相邻视频只预取 metadata，减少左右切换等待，同时避免后台下载大量视频。
 
+### 低码率播放副本
+
+阿里云轻量服务器常见公网上行只有几 Mbps，而高码率原视频可能持续需要 10–20 Mbps。
+HTTP Range、缓存和 Nginx 只能降低额外开销，不能突破物理带宽，因此项目增加了独立的视频播放入口：
+
+- 原文件永远不改动，下载仍保持原始 MD5/SHA-256。
+- 视频灯箱提供“720P / 原画”两档选择，切换时保留播放位置和播放状态。
+- 默认优先使用 720P；720P 请求 `/api/files/:id/preview`，原画请求原始文件 `/raw`。
+- 如果 720P 副本尚未生成，播放器自动回退原画并禁用 720P 选项。
+- 如果存在低码率 fast-start 预览副本，就播放副本；如果不存在，自动回退原始视频。
+- 720P 选项在预览副本尚未生成时显示为不可选，生成后刷新页面即可使用。
+- 新上传的视频在服务器安装 ffmpeg 后会自动排队生成预览。
+- 已有视频可手动批量生成：
+
+```bash
+# Ubuntu / Debian
+sudo apt update && sudo apt install -y ffmpeg
+
+# 为全部已有视频生成
+npm run preview:videos
+
+# 或只处理一个文件（文件名或文件 ID）
+npm run preview:video -- "B260912弱柳扶风118s.mp4"
+```
+
+默认预览参数为最高 720p、H.264 约 1.8Mbps、AAC 96kbps，适合约 3–5Mbps 的公网上行。
+
+预览副本会额外占用磁盘空间，但不计入原始文件配额；彻底删除原文件时会同步清理预览副本。ffmpeg 处理的是用户上传内容，生产环境应保持 ffmpeg 更新，并让服务以最小权限账号运行。
+可通过环境变量调整：
+
+| 环境变量 | 默认值 | 作用 |
+|---|---|---|
+| `FFMPEG_PATH` | `ffmpeg` | ffmpeg 可执行文件路径 |
+| `AUTO_VIDEO_PREVIEW` | 启用 | 设为 `0` 禁止新上传自动生成 |
+| `VIDEO_PREVIEW_TIMEOUT_MS` | 900000 | 单个视频转码超时 |
+
+### Nginx 视频流配置
+
+服务端已经返回 `X-Accel-Buffering: no`，仍建议在 Nginx 中显式关闭媒体接口代理缓冲：
+
+```nginx
+location /api/files/ {
+    proxy_pass http://127.0.0.1:8787;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_buffering off;
+    proxy_request_buffering off;
+    proxy_read_timeout 300s;
+}
+```
+
 ### 静态资源更新
 
 `public/` 下的 HTML、JS、CSS 统一返回 `Cache-Control: no-cache, must-revalidate`，
@@ -45,7 +98,7 @@
 - 文件没变：返回 304，不重复下载。
 - 部署了新文件并重启：ETag 改变，浏览器自动获取新版，不需要用户手动清除缓存。
 
-`index.html` 里还通过 `?v=1.5.3` 引用前端资源。发布新版本时请同步更新
+`index.html` 里还通过 `?v=1.6.1` 引用前端资源。发布新版本时请同步更新
 `package.json`、`public/app.js` 的 `APP_VERSION` 和这三个查询串；这样即使旧浏览器
 仍缓存着上一版脚本，也会因为 URL 变化立刻请求新文件。
 
@@ -143,11 +196,11 @@ window.VAULT_CONFIG = { apiBase: 'https://api.example.com' }
 server.js               入口
 package.json            提供 "type": "module"，见下方说明
 config.example.json     配置模板（真实配置 config.json 首次启动自动生成）
-lib/                    10 个文件：config cors db paths media rate-limit store auth api static
+lib/                    11 个文件：config cors db paths media rate-limit store auth api static video-preview
 public/                 5 个文件：index.html app.js styles.css config.js favicon.svg
 ```
 
-一共 18 个文件。项目**零第三方依赖，不需要 `npm install`，也没有 `node_modules`**。
+一共 20 个文件（另含 `scripts/optimize-video-previews.mjs`）。项目**零第三方依赖，不需要 `npm install`，也没有 `node_modules`**。
 SQLite 用的是 Node 22 内置的 `node:sqlite`，同样不需要装任何东西。
 
 > **Node 版本要求提高到 ≥ 22.5**（`node:sqlite` 从这个版本开始提供）。
@@ -225,6 +278,7 @@ lib/cors.js           CORS 响应头与预检处理
 lib/paths.js          路径常量（单独一层，避免模块循环依赖）
 lib/media.js          MIME 补全、分类与安全内联类型判断
 lib/rate-limit.js     登录 / 注册 / 上传等敏感接口的内存限流
+lib/video-preview.js  可选的低码率 fast-start 视频播放副本生成
 lib/db.js             SQLite 连接、建表、内容哈希索引、旧数据迁移
 lib/store.js          数据访问层（所有 SQL 都集中在这里）
 lib/auth.js           scrypt 密码哈希、HMAC 会话令牌、Cookie 构造
@@ -238,6 +292,7 @@ config.json           站点配置（注册码），首次启动自动生成，�
 config.example.json   配置模板（入 Git）
 data/vault.db         SQLite 数据库（账号 + 文件索引 + SHA-256 去重指纹）
 data/uploads/         文件本体，按用户分文件夹
+data/previews/        视频低码率播放副本，不修改原文件
 data/secret.key       会话签名密钥
 ```
 
