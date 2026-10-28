@@ -17,8 +17,9 @@
  *    后端需要同时设置 ALLOWED_ORIGINS 为本页面的来源，并部署在 HTTPS 下
  *    —— 跨站的会话 Cookie 要求 SameSite=None 与 Secure 同时成立。
  *
- *  也可以不改本文件，直接在 index.html 里覆盖：
- *    <script>window.VAULT_CONFIG = { apiBase: 'https://api.example.com' }</script>
+ *  不要把配置写成 index.html 里的内联 <script>。
+ *  服务端 HTML CSP 只允许 script-src 'self'，内联脚本会被浏览器拒绝；
+ *  部署时应修改本文件，或由静态托管环境单独生成/替换 config.js。
  */
 window.VAULT_CONFIG = {
   apiBase: '',

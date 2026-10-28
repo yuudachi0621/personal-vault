@@ -15,10 +15,10 @@
  *   读写文件、开网络端口了。所以这个项目前后端都是 JS。
  *
  * 【本文件做的事】
- *   打开一个网络端口（默认 8787）。每来一个请求，就按顺序做三件事：
- *     1. 判断这次请求想干什么（看地址和请求方法）
- *     2. 派给对应的处理函数
- *     3. 把结果写回去
+ *   打开 HTTP 端口（默认 8787），为每个请求设置基础安全响应头，
+ *   先处理 CORS / API，再按配置决定是否托管 public/。
+ *   启动阶段还会初始化配置与数据库、执行历史数据迁移、打印运行模式，
+ *   并启动回收站定时清扫；退出时负责关闭 SQLite 连接。
  *
  * 【读代码前需要知道的 4 个概念】
  *
@@ -160,7 +160,8 @@ server.on('error', (error) => {
     console.error('  1. 找出来并关掉：netstat -ano | findstr :' + PORT + '，再 taskkill /PID <进程号> /F')
     console.error('  2. 或者换个端口：$env:PORT=8788; node server.js')
     console.error('\n注意：不要让两个实例同时指向同一个 data/ 目录 ——')
-    console.error('    每个实例各自在内存里缓存一份数据，会互相覆盖写入。\n')
+    console.error('    多个进程共享同一个 data/ 会导致 SQLite 锁竞争、定时任务重复执行，')
+    console.error('    并破坏内存限流和上传并发限制的全局性；请保持一个数据目录只运行一个实例。\n')
     process.exit(1)   // 以「失败」状态退出（0 表示正常退出）
   }
   throw error
@@ -213,9 +214,10 @@ server.headersTimeout = 60_000
  * 优雅退出：收到终止信号时先把数据库关掉。
  *
  * 为什么重要？
- *   SQLite 的 WAL 模式下，最新的写入可能还在 -wal 文件里。
- *   正常 close() 会把它合并回主文件。直接 kill -9 虽然也不会丢数据
- *   （WAL 本身就是为此设计的），但干净退出更稳妥。
+ *   SQLite 的 WAL 模式下，最新写入可能仍在 -wal 文件中。
+ *   正常 close() 会触发 checkpoint 并关闭连接，减少遗留 WAL/SHM 文件。
+ *   强制终止通常能保持数据库一致性，但最近的已提交数据仍可能因
+ *   操作系统缓存和 synchronous=NORMAL 策略而丢失，因此应优先优雅退出。
  */
 function shutdown(signal) {
   console.log(`\n收到 ${signal}，正在关闭…`)

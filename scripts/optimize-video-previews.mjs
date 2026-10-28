@@ -52,6 +52,7 @@ if (!records.length) {
 
 let generated = 0
 let reused = 0
+let skipped = 0
 let failed = 0
 
 for (const record of records) {
@@ -77,12 +78,18 @@ for (const record of records) {
       console.log(`已存在：${record.name}`)
     }
   } catch (error) {
-    failed += 1
-    console.error(`失败：${record.name}：${error.message}`)
+    if (error && error.code === 'PREVIEW_NOT_SMALLER') {
+      skipped += 1
+      const reason = error.cachedSkip ? '已有跳过标记，无需重复编码' : '原片已经足够小，无需额外副本'
+      console.log(`跳过：${record.name} · ${reason}`)
+    } else {
+      failed += 1
+      console.error(`失败：${record.name}：${error.message}`)
+    }
   }
 }
 
-console.log(`完成：新生成 ${generated}，复用 ${reused}，失败 ${failed}`)
+console.log(`完成：新生成 ${generated}，复用 ${reused}，跳过 ${skipped}，失败 ${failed}`)
 console.log('原始文件未修改，下载与 MD5/SHA-256 保持一致。')
 closeDb()
 if (failed) process.exitCode = 1

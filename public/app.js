@@ -14,7 +14,7 @@
      举例 —— 用户点「照片」分类时发生的事：
        1. 本文件把 state.category 改成 'image'
        2. 调 api('/api/files?category=image') 发请求
-       3. 后端从 files.json 里挑出该用户的照片，返回 JSON
+       3. 后端从 SQLite 中按 owner_id 和分类查询该用户的照片，返回 JSON
        4. 本文件拿到数据，重新渲染整个网格
 
    【为什么页面不用刷新就能变】
@@ -37,8 +37,9 @@
         文件最后的 boot() 就是给各个按钮挂上监听器的过程。
 
    【整体结构】按下面的分节标题顺序阅读即可
-     通用工具 → Toast 提示 → 视图切换 → 认证 → 列表渲染
-     → 数据加载 → 上传 → 图片缩放 → 音乐播放器 → 灯箱 → 事件绑定 → 启动
+     通用工具 → Toast 提示 → 视图切换 / 隐私解锁 → 认证 → 列表渲染
+     → 数据加载 → 上传 → 图片缩放 → 音乐播放器 → 视频与灯箱
+     → 文件操作 → 事件绑定 → 启动
    ══════════════════════════════════════════════════════════════════════════ */
 
 /**
@@ -71,7 +72,7 @@ const apiUrl = (path) => `${API_BASE}${path}`
 const state = {
   user: null,        // 当前登录用户，null 表示没登录
   files: [],         // 当前「已加载」的文件（可能只是第一页）
-  usage: null,       // 用量统计（总数、总大小、各分类数量）
+  usage: null,       // 当前视图的用量统计；隐私视图使用独立统计
   category: 'all',   // 当前选中的分类
   query: '',         // 搜索关键词
   sort: 'newest',    // 排序方式
@@ -84,6 +85,8 @@ const state = {
   trash: false,      // 是否处于回收站视图
   ttlMs: 24 * 60 * 60 * 1000, // 回收站保留时长（由服务器下发，前端只用来算倒计时）
   videoQuality: '720p', // 视频播放清晰度：720p / original
+  privacyMode: false,
+  privacyUnlocked: false,
 }
 
 /**
@@ -98,6 +101,13 @@ const state = {
  */
 const PAGE_SIZE = 60
 const VIDEO_QUALITY_KEY = 'personal-vault:video-quality'
+const PRIVACY_IDLE_MS = 10 * 60 * 1000
+const PRIVACY_HEARTBEAT_MS = 4 * 60 * 1000
+let privacyIdleTimer = 0
+let privacyAuthResolver = null
+let privacyAuthMode = 'unlock'
+let privacyHeartbeatAt = 0
+let privacyHeartbeatPromise = null
 try {
   const savedQuality = localStorage.getItem(VIDEO_QUALITY_KEY)
   if (['720p', 'original'].includes(savedQuality)) state.videoQuality = savedQuality
@@ -216,8 +226,16 @@ function uniqueFiles(fileList) {
  *
  * 改动前端功能时记得同步这里和 package.json。
  */
-const APP_VERSION = '1.6.2'
+const APP_VERSION = '1.7.3'
 
+/**
+ * 调用后端 JSON API，并把非 2xx 响应转换为异常。
+ *
+ * @param {string} path 以 /api/ 开头的相对路径
+ * @param {RequestInit} options fetch 选项；默认 credentials=include
+ * @returns {Promise<any>} 解析后的 JSON；空响应或非 JSON 成功响应返回 null
+ * @throws {Error & {status?: number, code?: string}} HTTP 非 2xx 时抛出
+ */
 async function api(path, options = {}) {
   /**
    * fetch 发起 HTTP 请求。两个要点：
@@ -311,6 +329,7 @@ function notify(message, kind = 'error') {
  * 同时清掉内存里的用户数据，并关掉可能开着的弹窗。
  */
 function showAuth() {
+  resetPrivacyState()
   state.user = null
   state.files = []
   clearPreviewPreloads()
@@ -324,6 +343,262 @@ function showAuth() {
   $('#load-more-wrap').hidden = true
   closeLightbox()
   $('#password-modal').hidden = true
+}
+
+function updatePrivacyIndicator() {
+  const label = $('#privacy-state')
+  if (!label) return
+  if (!state.user) label.textContent = '锁定'
+  else if (!state.user.hasPrivacyPassword) label.textContent = '未设置'
+  else if (state.privacyUnlocked) label.textContent = '已解锁'
+  else label.textContent = '锁定'
+}
+
+function clearPrivacyIdleTimer() {
+  clearTimeout(privacyIdleTimer)
+  privacyIdleTimer = 0
+}
+
+function closePrivacyAuthDialog(success = false) {
+  const modal = $('#privacy-modal')
+  const form = $('#privacy-form')
+  if (modal) modal.hidden = true
+  if (form) form.reset()
+  if (privacyAuthResolver) {
+    const resolve = privacyAuthResolver
+    privacyAuthResolver = null
+    resolve(Boolean(success))
+  }
+}
+
+function resetPrivacyState() {
+  clearPrivacyIdleTimer()
+  state.privacyMode = false
+  state.privacyUnlocked = false
+  privacyHeartbeatAt = 0
+  closePrivacyAuthDialog(false)
+  updatePrivacyIndicator()
+}
+
+function focusPrivacyAuthField() {
+  const form = $('#privacy-form')
+  const input = privacyAuthMode === 'reset' ? form.elements.accountPassword : form.elements.password
+  setTimeout(() => input.focus(), 0)
+}
+
+/** 在设置、解锁和重置三种表单状态之间切换。 */
+function applyPrivacyAuthMode(mode, { focus = true } = {}) {
+  privacyAuthMode = ['setup', 'unlock', 'reset'].includes(mode) ? mode : 'unlock'
+  const form = $('#privacy-form')
+  const setup = privacyAuthMode === 'setup'
+  const reset = privacyAuthMode === 'reset'
+  const needsConfirm = setup || reset
+  const accountField = $('#privacy-account-field')
+  const confirmField = $('#privacy-confirm-field')
+  const passwordInput = form.elements.password
+  const accountInput = form.elements.accountPassword
+  const links = $('.privacy-links', form)
+  const errorBox = $('[data-error]', form)
+
+  errorBox.hidden = true
+  accountField.hidden = !reset
+  accountInput.required = reset
+  $('#privacy-password-label').textContent = reset ? '新隐私密码' : '隐私密码'
+  confirmField.hidden = !needsConfirm
+  form.elements.confirmPassword.required = needsConfirm
+  passwordInput.minLength = needsConfirm ? 8 : 1
+  passwordInput.autocomplete = needsConfirm ? 'new-password' : 'current-password'
+  $('#privacy-reset-link').hidden = privacyAuthMode !== 'unlock'
+  $('#privacy-back').hidden = !reset
+  links.hidden = !(privacyAuthMode === 'unlock' || reset)
+
+  if (setup) {
+    $('#privacy-title').textContent = '设置隐私密码'
+    $('#privacy-desc').textContent = '首次使用需要设置独立的隐私密码。设置后，访问隐私文件必须再次验证。'
+    $('#privacy-hint').textContent = '首次设置至少 8 位。隐私空间用于访问隔离，不会加密磁盘上的原始文件。'
+    $('#privacy-submit').textContent = '设置并进入'
+  } else if (reset) {
+    $('#privacy-title').textContent = '重置隐私密码'
+    $('#privacy-desc').textContent = '输入当前账号密码验证身份，然后设置新的隐私密码。已存放的隐私文件不会被删除。'
+    $('#privacy-hint').textContent = '新隐私密码至少 8 位。重置后，其它设备上已解锁的隐私空间会立即失效。'
+    $('#privacy-submit').textContent = '重置并进入'
+  } else {
+    $('#privacy-title').textContent = '解锁隐私空间'
+    $('#privacy-desc').textContent = '请输入隐私密码以查看隐私空间中的文件。'
+    $('#privacy-submit').textContent = '解锁'
+  }
+  $('#privacy-hint').hidden = !needsConfirm
+
+  if (focus) focusPrivacyAuthField()
+}
+
+function openPrivacyAuthDialog() {
+  const setup = !state.user || !state.user.hasPrivacyPassword
+  const modal = $('#privacy-modal')
+  const form = $('#privacy-form')
+
+  form.reset()
+  applyPrivacyAuthMode(setup ? 'setup' : 'unlock', { focus: false })
+  modal.hidden = false
+  focusPrivacyAuthField()
+
+  return new Promise((resolve) => {
+    if (privacyAuthResolver) privacyAuthResolver(false)
+    privacyAuthResolver = resolve
+  })
+}
+
+async function requestPrivacyUnlock() {
+  if (state.privacyUnlocked) return true
+  return openPrivacyAuthDialog()
+}
+
+/** 提交隐私密码设置、解锁或账号密码验证重置表单。 */
+async function submitPrivacyAuth(form) {
+  const mode = privacyAuthMode
+  const needsConfirm = mode === 'setup' || mode === 'reset'
+  const password = form.elements.password.value
+  const confirmPassword = form.elements.confirmPassword.value
+  const accountPassword = form.elements.accountPassword.value
+  const errorBox = $('[data-error]', form)
+  const submit = $('#privacy-submit')
+  errorBox.hidden = true
+
+  if (needsConfirm && password !== confirmPassword) {
+    errorBox.textContent = '两次输入的新隐私密码不一致'
+    errorBox.hidden = false
+    form.elements.confirmPassword.focus()
+    return
+  }
+
+  submit.disabled = true
+  try {
+    const endpoint = mode === 'setup'
+      ? '/api/privacy/setup'
+      : mode === 'reset'
+        ? '/api/privacy/reset'
+        : '/api/privacy/unlock'
+    const payload = mode === 'reset' ? { accountPassword, newPassword: password } : { password }
+    const result = await api(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    if ((mode === 'setup' || mode === 'reset') && result.user) {
+      state.user = { ...state.user, ...result.user }
+    }
+    state.privacyUnlocked = true
+    privacyHeartbeatAt = Date.now()
+    updatePrivacyIndicator()
+    notePrivacyActivity()
+    closePrivacyAuthDialog(true)
+    if (mode === 'reset') notify('隐私密码已重置，旧解锁会话已失效', 'ok')
+  } catch (error) {
+    errorBox.textContent = error.message
+    errorBox.hidden = false
+  } finally {
+    submit.disabled = false
+  }
+}
+
+function notePrivacyActivity() {
+  if (!state.privacyUnlocked) return
+  clearPrivacyIdleTimer()
+  privacyIdleTimer = setTimeout(async () => {
+    if (!state.privacyUnlocked) return
+    const switchToAll = state.privacyMode
+    notify('隐私空间长时间未操作，已自动锁定', 'ok')
+    await lockPrivacySpace({ switchToAll })
+  }, PRIVACY_IDLE_MS)
+
+  // 本地活动只负责 10 分钟空闲锁定；后端令牌还需要在活跃期间续签，
+  // 否则观看长视频超过 15 分钟后，后续 Range 请求会突然变成 404。
+  const now = Date.now()
+  if (privacyHeartbeatPromise || now - privacyHeartbeatAt < PRIVACY_HEARTBEAT_MS) return
+  const request = api('/api/privacy/heartbeat', { method: 'POST' })
+  privacyHeartbeatPromise = request
+  request.then(() => {
+    privacyHeartbeatAt = Date.now()
+  }).catch(async (error) => {
+    if (privacyHeartbeatPromise !== request) return
+    if (error.code === 'PRIVACY_LOCKED' || error.status === 401) {
+      notify('隐私空间已失效，请重新解锁', 'ok')
+      await lockPrivacySpace({ switchToAll: state.privacyMode, skipHeartbeatWait: true })
+    }
+  }).finally(() => {
+    if (privacyHeartbeatPromise === request) privacyHeartbeatPromise = null
+  })
+}
+
+/**
+ * 立即锁定隐私空间并清理服务端隐私 Cookie。
+ *
+ * @param {{switchToAll?: boolean, silent?: boolean, skipHeartbeatWait?: boolean}} options
+ *   switchToAll=true 时切回“全部”并刷新；silent 透传给 refresh；
+ *   skipHeartbeatWait=true 供心跳失败路径使用，避免等待自身请求造成死锁。
+ * @returns {Promise<void>}
+ * 副作用：关闭灯箱和隐私弹窗、清除定时器、发起 /api/privacy/lock 请求。
+ */
+async function lockPrivacySpace({ switchToAll = false, silent = true, skipHeartbeatWait = false } = {}) {
+  clearPrivacyIdleTimer()
+  // 若心跳请求正在途中，先等它落地，再清 Cookie，避免响应把刚清除的解锁状态又写回来。
+  if (!skipHeartbeatWait && privacyHeartbeatPromise) {
+    try { await privacyHeartbeatPromise } catch { /* 下面统一清除 Cookie */ }
+  }
+  const wasPrivate = state.privacyMode || state.privacyUnlocked
+  state.privacyMode = false
+  state.privacyUnlocked = false
+  privacyHeartbeatAt = 0
+  closePrivacyAuthDialog(false)
+  closeLightbox()
+  updatePrivacyIndicator()
+  if (state.user) {
+    try { await api('/api/privacy/lock', { method: 'POST' }) } catch { /* 本地状态仍然立即锁定 */ }
+  }
+  if (switchToAll) {
+    state.category = 'all'
+    state.query = ''
+    $('#search-input').value = ''
+    $('#privacy-btn').classList.remove('is-active')
+    $('#trash-btn').classList.remove('is-active')
+    $$('#cat-list .cat-item').forEach((item) => item.classList.toggle('is-active', item.dataset.cat === 'all'))
+    await refresh({ silent })
+  } else if (wasPrivate) {
+    updatePrivacyIndicator()
+  }
+}
+
+async function recoverPrivacyAccess() {
+  state.privacyUnlocked = false
+  updatePrivacyIndicator()
+  if (await requestPrivacyUnlock()) {
+    state.privacyUnlocked = true
+    updatePrivacyIndicator()
+    notePrivacyActivity()
+    await refresh({ silent: true })
+  } else {
+    await lockPrivacySpace({ switchToAll: true })
+  }
+}
+
+async function enterPrivacySpace() {
+  if (state.privacyMode && state.privacyUnlocked) {
+    await lockPrivacySpace({ switchToAll: true })
+    return
+  }
+  const unlocked = await requestPrivacyUnlock()
+  if (!unlocked) return
+  state.privacyMode = true
+  state.privacyUnlocked = true
+  state.category = 'all'
+  state.query = ''
+  $('#search-input').value = ''
+  $$('#cat-list .cat-item').forEach((item) => item.classList.remove('is-active'))
+  $('#trash-btn').classList.remove('is-active')
+  $('#privacy-btn').classList.add('is-active')
+  updatePrivacyIndicator()
+  notePrivacyActivity()
+  await refresh()
 }
 
 /**
@@ -340,6 +615,7 @@ function showApp() {
   const name = state.user.nickname || state.user.email.split('@')[0]
   $('#user-name').textContent = name
   $('#user-avatar').textContent = name.slice(0, 1).toUpperCase()   // 头像显示首字
+  updatePrivacyIndicator()
   $('#dropdown-name').textContent = name
   $('#dropdown-mail').textContent = state.user.email
 }
@@ -436,6 +712,8 @@ function bindAuth() {
 
   $('#logout-btn').addEventListener('click', async () => {
     try {
+      // 先完成隐私 Cookie 清理，避免正在途中的心跳在退出后又把解锁 Cookie 写回来。
+      if (state.privacyUnlocked) await lockPrivacySpace()
       await api('/api/auth/logout', { method: 'POST' })
     } catch {
       /* 即使请求失败也回到登录页 */
@@ -471,6 +749,8 @@ function bindAuth() {
       })
       $('#password-modal').hidden = true
       form.reset()
+      // 修改账号密码会让服务端清除隐私 Cookie，前端同步回到锁定状态。
+      if (state.privacyUnlocked) await lockPrivacySpace({ switchToAll: state.privacyMode })
       notify('密码已更新', 'ok')
     } catch (error) {
       errorBox.textContent = error.message
@@ -534,6 +814,7 @@ function trashRemainText(record) {
 function cardHtml(record) {
   const raw = apiUrl(`/api/files/${record.id}/raw`)
   const inTrash = Boolean(record.deletedAt)
+  const inPrivacy = Boolean(record.isPrivate)
 
   let thumb
   if (record.category === 'image') {
@@ -550,7 +831,9 @@ function cardHtml(record) {
   // 回收站里的卡片：角标显示倒计时，操作换成「恢复 / 彻底删除」
   const badge = inTrash
     ? `<span class="card-badge is-trash" data-cat="trash"><i></i>${escapeHtml(trashRemainText(record))}</span>`
-    : `<span class="card-badge" data-cat="${record.category}"><i></i>${CATEGORY_LABEL[record.category]}</span>`
+    : inPrivacy
+      ? `<span class="card-badge is-private" data-cat="private"><i></i>隐私</span>`
+      : `<span class="card-badge" data-cat="${record.category}"><i></i>${CATEGORY_LABEL[record.category]}</span>`
 
   const actions = inTrash
     ? `<button type="button" title="恢复" aria-label="恢复" data-restore data-no-open>
@@ -559,14 +842,27 @@ function cardHtml(record) {
         <button type="button" title="彻底删除" aria-label="彻底删除" data-purge data-no-open>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 7h14M9.5 7V5.5A1.5 1.5 0 0 1 11 4h2a1.5 1.5 0 0 1 1.5 1.5V7"/><path d="M6.5 7l.8 11a1.6 1.6 0 0 0 1.6 1.5h6.2a1.6 1.6 0 0 0 1.6-1.5l.8-11"/></svg>
         </button>`
-    : `<a href="${apiUrl(`/api/files/${record.id}/download`)}" title="下载" aria-label="下载" data-no-open>
+    : inPrivacy
+      ? `<a href="${apiUrl(`/api/files/${record.id}/download`)}" title="下载" aria-label="下载" data-no-open>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11m0 0-4-4m4 4 4-4"/><path d="M5 19h14"/></svg>
         </a>
+        <button type="button" title="移出隐私空间" aria-label="移出隐私空间" data-unprivate data-no-open>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4.5" y="10" width="15" height="10" rx="2"/><path d="M8 10V7.5a4 4 0 0 1 7.2-2.4"/></svg>
+        </button>
+        <button type="button" title="彻底删除" aria-label="彻底删除" data-private-delete data-no-open>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 7h14M9.5 7V5.5A1.5 1.5 0 0 1 11 4h2a1.5 1.5 0 0 1 1.5 1.5V7"/><path d="M6.5 7l.8 11a1.6 1.6 0 0 0 1.6 1.5h6.2a1.6 1.6 0 0 0 1.6-1.5l.8-11"/></svg>
+        </button>`
+      : `<a href="${apiUrl(`/api/files/${record.id}/download`)}" title="下载" aria-label="下载" data-no-open>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11m0 0-4-4m4 4 4-4"/><path d="M5 19h14"/></svg>
+        </a>
+        <button type="button" title="移入隐私空间" aria-label="移入隐私空间" data-private data-no-open>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4.5" y="10" width="15" height="10" rx="2"/><path d="M8 10V7.5a4 4 0 0 1 8 0V10"/></svg>
+        </button>
         <button type="button" title="删除" aria-label="删除" data-delete data-no-open>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 7h14M9.5 7V5.5A1.5 1.5 0 0 1 11 4h2a1.5 1.5 0 0 1 1.5 1.5V7"/><path d="M6.5 7l.8 11a1.6 1.6 0 0 0 1.6 1.5h6.2a1.6 1.6 0 0 0 1.6-1.5l.8-11"/></svg>
         </button>`
 
-  return `<article class="card${inTrash ? ' is-in-trash' : ''}" data-id="${record.id}" tabindex="0">
+  return `<article class="card${inTrash ? ' is-in-trash' : ''}${inPrivacy ? ' is-private' : ''}" data-id="${record.id}" tabindex="0">
     <div class="card-thumb" data-open>
       ${badge}
       <div class="card-actions">${actions}</div>
@@ -586,7 +882,7 @@ function renderGrid() {
   const title = $('#view-title')
 
   // 回收站是独立视图，标题和分类无关
-  title.textContent = state.trash ? '回收站' : CATEGORY_LABEL[state.category]
+  title.textContent = state.privacyMode ? '隐私空间' : (state.trash ? '回收站' : CATEGORY_LABEL[state.category])
   // 显示的是「总数」，不是「已加载数」—— 用户关心的是这里到底有多少东西
   count.textContent = `${state.total} 项`
   $('#trash-banner').hidden = !state.trash
@@ -596,7 +892,10 @@ function renderGrid() {
     empty.hidden = false
     const searching = Boolean(state.query)
 
-    if (state.trash) {
+    if (state.privacyMode) {
+      $('#empty-title').textContent = searching ? '没有匹配的隐私文件' : '隐私空间还是空的'
+      $('#empty-desc').textContent = searching ? '换个关键词试试。' : '可直接上传文件，或返回「全部」后通过卡片上的锁按钮移入。'
+    } else if (state.trash) {
       $('#empty-title').textContent = '回收站是空的'
       $('#empty-desc').textContent = '删除的文件会先放到这里，24 小时内可以恢复。'
     } else if (searching) {
@@ -621,6 +920,8 @@ function renderGrid() {
 function renderUsage() {
   const usage = state.usage
   if (!usage) return
+  const storageHead = $('.storage-head span')
+  if (storageHead) storageHead.textContent = state.privacyMode ? '隐私空间用量' : '存储用量'
 
   const activeBytes = usage.bytes || 0
   const trashBytes = (usage.trash && usage.trash.bytes) || 0
@@ -628,7 +929,7 @@ function renderUsage() {
     ? usage.totalBytes
     : activeBytes + trashBytes
 
-  // 存储用量显示实际占用：正常文件 + 回收站文件，与上传配额的计算一致
+  // 普通视图显示正常文件 + 回收站；隐私视图的 usage 由隐私接口单独返回
   $('#storage-value').textContent = formatSize(totalBytes)
   $('#storage-value').title = trashBytes > 0
     ? `正常文件 ${formatSize(activeBytes)}，回收站 ${formatSize(trashBytes)}`
@@ -661,19 +962,7 @@ function renderUsage() {
 
 /* ───────────────────────────── 数据加载 ───────────────────────────── */
 
-/**
- * 从后端拉取文件列表并刷新界面。这是整个页面最核心的一个函数 ——
- * 切换分类、搜索、排序、上传完、删除后，全都会调用它。
- *
- * 它体现了前端最常用的思路：
- *   改状态 → 请求数据 → 重新渲染
- * 而不是「手动去改某一行 DOM」。因为每次都整体重画，
- * 界面显示的内容永远和数据一致，不会出现改了一处忘了另一处的情况。
- *
- * @param {boolean} silent 为 true 时不显示骨架屏（用于上传完成后的静默刷新，
- *                         避免界面闪一下影响体验）
- */
-/** 组装列表请求的参数（筛选、排序、分页一起带上）。 */
+/** 为普通文件视图组装分类、搜索、排序和分页参数。 */
 function buildListParams(offset) {
   /**
    * URLSearchParams 用来安全地拼查询参数。
@@ -710,10 +999,21 @@ function renderLoadMore() {
 /**
  * 按当前视图取一页数据。
  *
- * 正常列表和回收站是两个不同接口，但返回结构一致（files / usage / page），
- * 所以在这里统一成同一个函数，上面的渲染逻辑完全不用关心数据来自哪。
+ * 普通列表、回收站和隐私空间使用不同接口，但都返回 files / usage / page。
+ * 这里统一响应结构，让上层渲染逻辑不必区分数据来源。
+ *
+ * @param {number} offset 已加载条数
+ * @returns {Promise<{files: object[], usage: object, page: object, ttlMs?: number}>}
  */
 async function fetchPage(offset) {
+  if (state.privacyMode) {
+    const params = new URLSearchParams()
+    if (state.query) params.set('q', state.query)
+    params.set('sort', state.sort)
+    params.set('limit', String(PAGE_SIZE))
+    params.set('offset', String(offset))
+    return api(`/api/privacy/files?${params}`)
+  }
   if (state.trash) {
     const params = new URLSearchParams()
     if (state.query) params.set('q', state.query)
@@ -728,15 +1028,11 @@ async function fetchPage(offset) {
 }
 
 /**
- * 加载第一页，并重置列表。切换分类、搜索、排序、上传完成都会走这里。
+ * 加载当前视图第一页并整体重绘。切换分类、搜索、排序、上传完成和文件操作
+ * 都会走这里；重绘保证 DOM 与 state 一致。
  *
- * 它体现了前端最常用的思路：
- *   改状态 → 请求数据 → 重新渲染
- * 而不是「手动去改某一行 DOM」。因为每次都整体重画，
- * 界面显示的内容永远和数据一致。
- *
- * @param {boolean} silent 为 true 时不显示骨架屏（用于上传后的静默刷新，
- *                         避免界面闪一下影响体验）
+ * @param {{silent?: boolean}} options silent=true 时跳过骨架屏，避免静默刷新闪烁
+ * @returns {Promise<void>}
  */
 async function refresh({ silent = false } = {}) {
   const skeleton = $('#skeleton')
@@ -763,9 +1059,13 @@ async function refresh({ silent = false } = {}) {
     renderLoadMore() // 更新「加载更多」按钮
   } catch (error) {
     /**
-     * 401 表示登录已失效（比如令牌过期，或 Cookie 被清了）。
-     * 这种情况不该弹错误提示，而应该直接退回到登录页让用户重新登录。
+     * PRIVACY_LOCKED 只表示隐私解锁过期，应弹出隐私密码框而不是退出登录；
+     * 其它 401 才说明普通登录会话已失效。
      */
+    if (error.code === 'PRIVACY_LOCKED') {
+      await recoverPrivacyAccess()
+      return
+    }
     if (error.status === 401) {
       showAuth()
       return
@@ -803,6 +1103,10 @@ async function loadMore() {
     // insertAdjacentHTML 把新卡片的 HTML 直接塞到网格末尾，不破坏已有的 DOM
     $('#file-grid').insertAdjacentHTML('beforeend', data.files.map(cardHtml).join(''))
   } catch (error) {
+    if (error.code === 'PRIVACY_LOCKED') {
+      await recoverPrivacyAccess()
+      return
+    }
     if (error.status === 401) {
       showAuth()
       return
@@ -825,18 +1129,22 @@ async function loadMore() {
  *   所以这里必须用老 API。
  *
  * 【请求体直接就是文件本身】
- *   注意 xhr.send(file)：把 File 对象直接当请求体发出去，
- *   没有任何表单包装。文件名和分类放在 URL 查询参数里。
- *   后端因此可以「拿到多少写多少」，不用先解析格式。
+ *   注意 xhr.send(file)：把 File 对象直接当请求体发出去，没有任何表单包装。
+ *   文件名和 privacy 标记通过 URL 查询参数传递，分类始终由服务端判断；
+ *   后端因此可以「拿到多少写多少」，不用先解析 multipart 格式。
  *
- * 用 Promise 包住是为了能在外面写 `await uploadOne(...)`，
- * 把回调式的写法转成顺序式的写法。
+ * 用 Promise 包住回调式 XHR，方便 uploadFiles() 并发等待上传结果。
+ *
+ * @param {File} file 浏览器 File 对象
+ * @returns {Promise<boolean>} 成功为 true；业务失败或网络失败为 false
  */
 function uploadOne(file) {
   return new Promise((resolve) => {
     // 文件名要经过 URLSearchParams 编码，否则中文名会让服务器返回 400。
     // 分类由服务端按 MIME / 扩展名判断，避免受当前浏览分类影响。
     const params = new URLSearchParams({ name: file.name })
+    // 在隐私空间里发起的上传直接落为隐私文件，避免上传后又出现在“全部”中。
+    if (state.privacyMode) params.set('private', '1')
 
     // 先弹一个 0% 的进度条，后面随上传实时更新
     const toast = createToast({ title: file.name, sub: `0% · ${formatSize(file.size)}` })
@@ -856,6 +1164,8 @@ function uploadOne(file) {
      * event.loaded 是已发送字节数，event.total 是总字节数。
      */
     xhr.upload.addEventListener('progress', (event) => {
+      // 大文件上传本身也是有效操作，不能让十分钟空闲计时在上传中被误触发。
+      notePrivacyActivity()
       if (!event.lengthComputable) return
       const ratio = event.loaded / event.total
       toast.progress(ratio)
@@ -881,14 +1191,21 @@ function uploadOne(file) {
       }
       // 状态码不在 2xx 范围内，说明后端拒绝了，尝试读出它给的原因
       let message = `上传失败（${xhr.status}）`
+      let errorCode = ''
       try {
         const body = JSON.parse(xhr.responseText)
         if (body && body.error) message = body.error
+        if (body && body.code) errorCode = body.code
       } catch {
         /* 响应不是 JSON，就用上面的通用提示 */
       }
       toast.fail(message)
-      if (xhr.status === 401) showAuth()   // 登录失效，退回登录页
+      if (errorCode === 'PRIVACY_LOCKED') {
+        // 这是隐私会话过期，不是登录过期，不能把用户踢回登录页。
+        void lockPrivacySpace({ switchToAll: state.privacyMode })
+      } else if (xhr.status === 401) {
+        showAuth()
+      }
       resolve(false)
     })
 
@@ -1018,6 +1335,11 @@ function resetZoom() {
  * 位置是 (p - x) / scale。缩放后要让它仍停在 p：
  *   p = 新x + (p - 旧x) / 旧scale * 新scale
  * 整理得  新x = p - (p - 旧x) * (新scale / 旧scale)
+ *
+ * @param {number} nextScale 目标倍数，自动限制在 ZOOM_MIN..ZOOM_MAX
+ * @param {number} anchorX 锚点相对预览区中心的 X 像素偏移
+ * @param {number} anchorY 锚点相对预览区中心的 Y 像素偏移
+ * @returns {void}
  */
 function zoomTo(nextScale, anchorX = 0, anchorY = 0) {
   if (!zoom.el) return
@@ -1038,11 +1360,11 @@ function zoomTo(nextScale, anchorX = 0, anchorY = 0) {
 }
 
 /**
- * 给灯箱里的图片挂上缩放交互：
- *   滚轮      缩放（以指针为锚点）
- *   双击      在 1x 与 2.5x 之间切换
- *   拖动      放大后拖拽平移
- *   双指捏合  触屏缩放
+ * 给灯箱图片绑定滚轮、双击、拖动和双指捏合缩放。
+ *
+ * @param {HTMLImageElement} img 灯箱中的图片元素
+ * @returns {void}
+ * 副作用：读取并更新模块级 zoom 状态，修改 transform/class，注册 DOM 指针事件。
  */
 function setupImageZoom(img) {
   const stage = img.parentElement
@@ -1209,6 +1531,7 @@ function setupAudioPlayer(container) {
     seek.value = String(Math.round(ratio * 1000))
     currentLabel.textContent = formatPlaybackTime(audio.currentTime)
     durationLabel.textContent = formatPlaybackTime(duration)
+    if (!audio.paused && state.privacyMode) notePrivacyActivity()
   }
 
   let progressTimer = 0
@@ -1357,7 +1680,13 @@ function crossOriginPreview(resource, src) {
   return resource
 }
 
-/** 预热相邻照片；相邻视频只预取 metadata，避免提前下载大量视频流量。 */
+/**
+ * 预热前后各两张照片；仅对紧邻视频预取 metadata，避免额外下载大量视频。
+ * 资源保存在有界缓存中，超出上限会释放旧的 src。
+ *
+ * @param {number} index 当前灯箱文件在 state.files 中的索引
+ * @returns {void}
+ */
 function preloadAdjacentPreviews(index) {
   if (index < 0) return
   for (const distance of [-2, -1, 1, 2]) {
@@ -1395,7 +1724,11 @@ function videoPlaybackUrl(record, quality) {
     : apiUrl(`/api/files/${record.id}/preview`)
 }
 
-/** 查询 720P 播放副本是否已经生成。 */
+/**
+ * 用 HEAD 查询 720P 副本是否可用。
+ * 服务端只有在副本存在且小于原片时才返回 X-Video-Preview: optimized；
+ * 不可用时自动回退原画并更新本地清晰度偏好。
+ */
 async function refreshVideoQualityAvailability(record) {
   const select = $('#video-quality')
   const option = $('option[value="720p"]', select)
@@ -1423,7 +1756,12 @@ async function refreshVideoQualityAvailability(record) {
   }
 }
 
-/** 切换清晰度时保留当前播放时间和播放/暂停状态。 */
+/**
+ * 切换原画 / 720P，并保留当前播放时间与播放状态。
+ * @param {object} record 视频文件记录
+ * @param {'720p'|'original'} quality 目标清晰度
+ * @returns {void}
+ */
 function applyVideoQuality(record, quality) {
   const video = $('#lightbox-body video')
   const select = $('#video-quality')
@@ -1454,7 +1792,7 @@ function applyVideoQuality(record, quality) {
   }, { once: true })
 }
 
-/** 视频缓冲或定位时给出明确状态，并在长时间卡住后自动重连一次。 */
+/** 视频缓冲或定位时给出明确状态；连续 8 秒无数据时最多自动重连两次。 */
 function setupVideoPlayer(record, container) {
   const video = $('video', container)
   const loading = $('[data-video-loading]', container)
@@ -1554,6 +1892,7 @@ function setupVideoPlayer(record, container) {
   })
   video.addEventListener('timeupdate', () => {
     if (!video.paused) {
+      if (state.privacyMode) notePrivacyActivity()
       lastActivityAt = Date.now()
       clearRecoveryTimer()
       recoveryAttempts = 0
@@ -1609,6 +1948,13 @@ async function navigateLightbox(direction) {
   openLightbox(state.files[targetIndex].id)
 }
 
+/**
+ * 打开当前已加载列表中的文件预览。
+ * 会根据分类创建图片、视频、音频或文件占位视图，并启动相邻文件预加载。
+ *
+ * @param {string} id 文件 ID，必须已存在于 state.files
+ * @returns {void}
+ */
 function openLightbox(id) {
   const record = state.files.find((row) => row.id === id)
   if (!record) return
@@ -1617,11 +1963,10 @@ function openLightbox(id) {
 
   const raw = apiUrl(`/api/files/${record.id}/raw`)
   const inTrash = Boolean(record.deletedAt)
+  const inPrivate = Boolean(record.isPrivate)
   const index = lightboxRecordIndex(id)
   const position = state.total > 1 && index >= 0 ? ` · ${index + 1} / ${state.total}` : ''
-  const summary = inTrash
-    ? `${CATEGORY_LABEL[record.category]} · ${formatSize(record.size)} · ${trashRemainText(record)}`
-    : `${CATEGORY_LABEL[record.category]} · ${formatSize(record.size)} · ${formatDate(record.createdAt)}`
+  const summary = `${inPrivate ? '隐私 · ' : ''}${CATEGORY_LABEL[record.category]} · ${formatSize(record.size)} · ${inTrash ? trashRemainText(record) : formatDate(record.createdAt)}`
 
   $('#lightbox-name').textContent = record.name
   $('#lightbox-sub').textContent = `${summary}${position}`
@@ -1629,7 +1974,9 @@ function openLightbox(id) {
 
   // 回收站里：显示「恢复」，删除按钮改成「彻底删除」
   $('#lightbox-restore').hidden = !inTrash
-  $('#lightbox-delete').textContent = inTrash ? '彻底删除' : '删除'
+  $('#lightbox-private').hidden = inTrash
+  $('#lightbox-private').textContent = inPrivate ? '移出隐私空间' : '移入隐私空间'
+  $('#lightbox-delete').textContent = (inTrash || inPrivate) ? '彻底删除' : '删除'
   $('#video-quality-control').hidden = record.category !== 'video'
 
   resetZoom()
@@ -1747,6 +2094,55 @@ async function deleteFile(id) {
   }
 }
 
+/** 将普通文件移入隐私空间。 */
+async function moveToPrivacy(id) {
+  const record = state.files.find((row) => row.id === id)
+  if (!record || record.isPrivate) return
+  if (!window.confirm(`把「${record.name}」移入隐私空间？\n\n移入后不会出现在全部、分类搜索和回收站中。`)) return
+  if (!(await requestPrivacyUnlock())) return
+  try {
+    await api(`/api/privacy/files/${id}`, { method: 'POST' })
+    if (state.lightboxId === id) closeLightbox()
+    notify(`已移入隐私空间：${record.name}`, 'ok')
+    await refresh({ silent: true })
+  } catch (error) {
+    if (error.code === 'PRIVACY_LOCKED') await recoverPrivacyAccess()
+    else notify(error.message)
+  }
+}
+
+/** 将隐私文件移回普通空间。 */
+async function moveOutOfPrivacy(id) {
+  const record = state.files.find((row) => row.id === id)
+  if (!record || !record.isPrivate) return
+  if (!window.confirm(`把「${record.name}」移出隐私空间？`)) return
+  try {
+    await api(`/api/privacy/files/${id}/move-out`, { method: 'POST' })
+    if (state.lightboxId === id) closeLightbox()
+    notify(`已移出隐私空间：${record.name}`, 'ok')
+    await refresh({ silent: true })
+  } catch (error) {
+    if (error.code === 'PRIVACY_LOCKED') await recoverPrivacyAccess()
+    else notify(error.message)
+  }
+}
+
+/** 隐私空间内永久删除。 */
+async function deletePrivateFile(id) {
+  const record = state.files.find((row) => row.id === id)
+  if (!record) return
+  if (!window.confirm(`彻底删除「${record.name}」？\n\n隐私空间内的删除不可恢复。`)) return
+  try {
+    await api(`/api/privacy/files/${id}`, { method: 'DELETE' })
+    if (state.lightboxId === id) closeLightbox()
+    notify(`已彻底删除：${record.name}`, 'ok')
+    await refresh({ silent: true })
+  } catch (error) {
+    if (error.code === 'PRIVACY_LOCKED') await recoverPrivacyAccess()
+    else notify(error.message)
+  }
+}
+
 /** 从回收站恢复。 */
 async function restoreFile(id) {
   const record = state.files.find((row) => row.id === id)
@@ -1800,18 +2196,51 @@ async function emptyTrash() {
 
 function bindApp() {
   // 分类切换
-  $('#cat-list').addEventListener('click', (event) => {
+  $('#cat-list').addEventListener('click', async (event) => {
     const btn = event.target.closest('[data-cat]')
     if (!btn) return
+    // 离开隐私空间即重新上锁，之后再次访问必须重新输入隐私密码。
+    if (state.privacyMode) await lockPrivacySpace()
     state.category = btn.dataset.cat
     state.trash = false                       // 从回收站切回普通列表
     $('#trash-btn').classList.remove('is-active')
+    $('#privacy-btn').classList.remove('is-active')
     $$('#cat-list .cat-item').forEach((item) => item.classList.toggle('is-active', item === btn))
-    refresh()
+    await refresh()
   })
 
   // 回收站入口：独立视图，进去时清空搜索词，避免带着别的条件看
-  $('#trash-btn').addEventListener('click', () => openTrashView())
+  $('#trash-btn').addEventListener('click', async () => {
+    if (state.privacyMode) await lockPrivacySpace()
+    await openTrashView()
+  })
+
+  // 隐私空间入口与密码设置 / 解锁弹窗
+  $('#privacy-btn').addEventListener('click', () => { void enterPrivacySpace() })
+  $('#privacy-form').addEventListener('submit', (event) => {
+    event.preventDefault()
+    void submitPrivacyAuth(event.currentTarget)
+  })
+  $('#privacy-modal').addEventListener('click', (event) => {
+    if (event.target.closest('[data-close]')) closePrivacyAuthDialog(false)
+  })
+  $('#privacy-reset-link').addEventListener('click', () => {
+    const form = $('#privacy-form')
+    form.reset()
+    applyPrivacyAuthMode('reset')
+  })
+  $('#privacy-back').addEventListener('click', () => {
+    const form = $('#privacy-form')
+    form.reset()
+    applyPrivacyAuthMode('unlock')
+  })
+
+  // 隐私空间中的普通浏览、点击、滚动、键盘操作都会刷新空闲计时；
+  // 音视频播放另有 timeupdate 持续调用。
+  document.addEventListener('pointerdown', notePrivacyActivity, { passive: true, capture: true })
+  document.addEventListener('keydown', notePrivacyActivity, { passive: true, capture: true })
+  document.addEventListener('wheel', notePrivacyActivity, { passive: true, capture: true })
+  document.addEventListener('touchstart', notePrivacyActivity, { passive: true, capture: true })
 
   $('#empty-trash-btn').addEventListener('click', emptyTrash)
 
@@ -1925,6 +2354,18 @@ function bindApp() {
   grid.addEventListener('click', (event) => {
     const card = event.target.closest('.card')
     if (!card) return
+    if (event.target.closest('[data-private]')) {
+      moveToPrivacy(card.dataset.id)
+      return
+    }
+    if (event.target.closest('[data-unprivate]')) {
+      moveOutOfPrivacy(card.dataset.id)
+      return
+    }
+    if (event.target.closest('[data-private-delete]')) {
+      deletePrivateFile(card.dataset.id)
+      return
+    }
     if (event.target.closest('[data-delete]')) {
       deleteFile(card.dataset.id)
       return
@@ -1961,11 +2402,21 @@ function bindApp() {
   $('#lightbox-restore').addEventListener('click', () => {
     if (state.lightboxId) restoreFile(state.lightboxId)
   })
+  $('#lightbox-private').addEventListener('click', () => {
+    if (!state.lightboxId) return
+    const record = state.files.find((row) => row.id === state.lightboxId)
+    if (!record) return
+    if (record.isPrivate) moveOutOfPrivacy(record.id)
+    else moveToPrivacy(record.id)
+  })
   $('#lightbox-delete').addEventListener('click', () => {
     if (!state.lightboxId) return
-    // 在回收站里看到的是「彻底删除」，在普通列表里是「移入回收站」
-    if (state.trash) purgeFile(state.lightboxId)
-    else deleteFile(state.lightboxId)
+    const record = state.files.find((row) => row.id === state.lightboxId)
+    if (!record) return
+    // 隐私空间内的删除是永久删除；回收站内也是永久删除；普通文件则先进入回收站。
+    if (record.isPrivate) deletePrivateFile(record.id)
+    else if (state.trash) purgeFile(record.id)
+    else deleteFile(record.id)
   })
 
   // 弹窗关闭
@@ -2015,7 +2466,8 @@ function bindApp() {
     }
 
     if (event.key !== 'Escape') return
-    if (!$('#lightbox').hidden) closeLightbox()
+    if (!$('#privacy-modal').hidden) closePrivacyAuthDialog(false)
+    else if (!$('#lightbox').hidden) closeLightbox()
     else if (!$('#password-modal').hidden) $('#password-modal').hidden = true
     else if (!$('#user-dropdown').hidden) $('#user-dropdown').hidden = true
   })
@@ -2025,6 +2477,13 @@ function bindApp() {
     if (zoom.el) applyZoom()
     const video = $('#lightbox-body video')
     if (video && window.innerWidth < 720) video.setAttribute('preload', 'metadata')
+  })
+
+  // 浏览器从前进 / 后退缓存恢复页面时也视为一次重新进入，必须再次解锁。
+  window.addEventListener('pageshow', (event) => {
+    if (event.persisted && state.privacyUnlocked) {
+      void lockPrivacySpace({ switchToAll: state.privacyMode })
+    }
   })
 }
 
@@ -2070,10 +2529,11 @@ async function loadAuthConfig() {
  *   就得重写一遍。现在服务器只给数据（JSON），
  *   谁来拿、拿去做成什么样，都由各自的前端决定 —— 这就是前后端分离的意义。
  *
- * 【这个函数做了三件事】
- *   1. 给所有按钮和输入框挂上事件监听器
- *   2. 问服务器「我现在登录着吗」
- *   3. 根据回答决定显示登录页还是主界面
+ * 【这个函数做的事】
+ *   1. 写入前端版本号并绑定认证 / 主界面事件
+ *   2. 并行读取注册策略
+ *   3. 查询当前登录用户，成功后清除旧隐私解锁并加载第一页文件
+ *   4. 未登录或会话失效时显示登录页
  */
 async function boot() {
   // 把前端版本号写进界面，方便判断当前跑的是哪一版
@@ -2097,6 +2557,8 @@ async function boot() {
      */
     const { user } = await api('/api/auth/me')
     state.user = user
+    // 刷新 / 重新打开页面后必须重新输入隐私密码。服务端 Cookie 不能跨页面加载续用。
+    await api('/api/privacy/lock', { method: 'POST' }).catch(() => {})
     showApp()
     await refresh()   // 登录状态确认后，才去加载文件列表
   } catch {

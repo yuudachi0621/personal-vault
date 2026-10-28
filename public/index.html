@@ -31,8 +31,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#faf9f5">
   <title>个人云存储 · 视频 / 照片 / 文件</title>
-  <link rel="icon" href="/favicon.svg?v=1.6.2">
-  <link rel="stylesheet" href="/styles.css?v=1.6.2">
+  <link rel="icon" href="/favicon.svg?v=1.7.3">
+  <link rel="stylesheet" href="/styles.css?v=1.7.3">
 </head>
 
 <body>
@@ -218,11 +218,19 @@
             </svg>
             <span>文件</span><em data-count="file">0</em>
           </button>
-        </nav>
 
-        <!-- 回收站：与上面的分类分开放，它是另一个视图而不是一种类型 -->
-        <div class="sidebar-sep"></div>
-        <nav class="cat-list">
+          <!-- 隐私空间和回收站属于独立视图，与分类用横线分开；上下间距保持一致 -->
+          <div class="sidebar-sep" aria-hidden="true"></div>
+          <button class="cat-item privacy-item" type="button" id="privacy-btn">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"
+              stroke-linejoin="round" aria-hidden="true">
+              <rect x="4.5" y="10" width="15" height="10" rx="2.2" />
+              <path d="M8 10V7.5a4 4 0 0 1 8 0V10" />
+              <path d="M12 14v2.5" />
+            </svg>
+            <span>隐私空间</span><em id="privacy-state">锁定</em>
+          </button>
+          <div class="sidebar-sep sidebar-sep-inside" aria-hidden="true"></div>
           <button class="cat-item" type="button" id="trash-btn">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"
               stroke-linejoin="round" aria-hidden="true">
@@ -361,6 +369,7 @@
             </button>
           </div>
           <button class="btn btn-ghost btn-sm" id="lightbox-restore" type="button" hidden>恢复</button>
+          <button class="btn btn-ghost btn-sm" id="lightbox-private" type="button" hidden>移入隐私空间</button>
           <a class="btn btn-ghost btn-sm" id="lightbox-download" href="#" download>下载</a>
           <button class="btn btn-ghost btn-sm is-danger" id="lightbox-delete" type="button">删除</button>
           <button class="icon-btn" data-close type="button" aria-label="关闭">
@@ -410,10 +419,50 @@
     </div>
   </div>
 
+  <!-- ══════════════════════════ 隐私空间解锁 / 设置 ══════════════════════════ -->
+  <div id="privacy-modal" class="modal" hidden>
+    <div class="modal-backdrop" data-close></div>
+    <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="privacy-title">
+      <header class="modal-head">
+        <h3 id="privacy-title">隐私空间</h3>
+        <button class="icon-btn" data-close type="button" aria-label="关闭">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <path d="M6 6l12 12M18 6 6 18" />
+          </svg>
+        </button>
+      </header>
+      <form id="privacy-form" class="modal-body">
+        <p class="privacy-desc" id="privacy-desc">输入隐私密码以进入隐私空间。</p>
+        <label class="field" id="privacy-account-field" hidden>
+          <span>当前账号密码</span>
+          <input type="password" name="accountPassword" maxlength="128" autocomplete="current-password">
+        </label>
+        <label class="field" id="privacy-password-field">
+          <span id="privacy-password-label">隐私密码</span>
+          <input type="password" name="password" required maxlength="128" autocomplete="current-password">
+        </label>
+        <label class="field" id="privacy-confirm-field" hidden>
+          <span>确认新隐私密码</span>
+          <input type="password" name="confirmPassword" maxlength="128" autocomplete="new-password">
+        </label>
+        <div class="privacy-links">
+          <button class="privacy-text-btn" type="button" id="privacy-reset-link" hidden>忘记隐私密码？</button>
+          <button class="privacy-text-btn" type="button" id="privacy-back" hidden>返回密码解锁</button>
+        </div>
+        <p class="privacy-hint" id="privacy-hint" hidden>首次设置至少 8 位。隐私空间用于访问隔离，不会加密磁盘上的原始文件。</p>
+        <p class="form-error" data-error hidden></p>
+        <div class="modal-actions">
+          <button class="btn btn-ghost" type="button" data-close>取消</button>
+          <button class="btn btn-primary" type="submit" id="privacy-submit">解锁</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
   <div id="toasts" class="toasts" aria-live="polite"></div>
 
-  <script src="/config.js?v=1.6.2"></script>
-  <script src="/app.js?v=1.6.2"></script>
+  <script src="/config.js?v=1.7.3"></script>
+  <script src="/app.js?v=1.7.3"></script>
 </body>
 
 </html>

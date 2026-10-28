@@ -285,11 +285,15 @@ a { color: inherit; text-decoration: none; }
 .cat-item.is-active { background: var(--bg-sink); color: var(--text); }
 .cat-item.is-active svg { color: var(--brand); }
 .cat-item.is-active em { color: var(--brand-600); }
+.privacy-item { color: var(--text-2); }
+.privacy-item em { color: var(--muted); font-size: 11px; }
+.privacy-item.is-active { color: var(--plum); }
+.privacy-item.is-active em { color: var(--plum); }
 
 .cat-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dot, var(--brand)); flex: none; }
 
-/* 回收站入口与上方分类之间的分隔线 */
-.sidebar-sep { height: 1px; background: var(--border); margin: 10px 6px; }
+/* 分类与隐私空间 / 回收站之间的分隔线 */
+.sidebar-sep { height: 1px; background: var(--border); margin: 12px 6px; }
 
 .storage-card {
   padding: 16px; border-radius: 12px;
@@ -369,6 +373,9 @@ a { color: inherit; text-decoration: none; }
 .card-badge[data-cat="file"] i { background: var(--amber); }
 .card-badge.is-trash { color: var(--danger); background: rgba(252, 235, 235, .94); }
 .card-badge.is-trash i { background: var(--danger); }
+.card-badge.is-private { color: var(--plum); background: rgba(245, 239, 243, .95); }
+.card-badge.is-private i { background: var(--plum); }
+.card.is-private { border-color: #e4d8e0; }
 
 /* 回收站里的卡片：缩略图压灰，一眼能看出「这已经不是正常文件了」 */
 .card.is-in-trash .card-thumb > img,
@@ -643,6 +650,11 @@ a { color: inherit; text-decoration: none; }
 .modal-head h3 { margin: 0; font-family: var(--font-display); font-size: 17px; font-weight: 400; }
 .modal-body { padding: 18px 16px 16px; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 6px; }
+.privacy-desc { margin: 0 0 16px; color: var(--text-2); font-size: 13px; }
+.privacy-hint { margin: -2px 0 13px; padding: 9px 11px; border-radius: 8px; background: var(--bg-soft); color: var(--muted); font-size: 12px; line-height: 1.6; }
+.privacy-links { display: flex; justify-content: flex-end; min-height: 18px; margin: -5px 0 11px; }
+.privacy-text-btn { padding: 0; color: var(--brand-600); font-size: 12px; line-height: 18px; }
+.privacy-text-btn:hover { color: var(--brand); text-decoration: underline; text-underline-offset: 3px; }
 
 /* ─────────────────────────── 提示条 ─────────────────────────── */
 .toasts {
