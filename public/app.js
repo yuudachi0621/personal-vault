@@ -210,7 +210,7 @@ function uniqueFiles(fileList) {
  *
  * 改动前端功能时记得同步这里和 package.json。
  */
-const APP_VERSION = '1.5.0'
+const APP_VERSION = '1.5.2'
 
 async function api(path, options = {}) {
   /**
@@ -307,6 +307,7 @@ function notify(message, kind = 'error') {
 function showAuth() {
   state.user = null
   state.files = []
+  clearPreviewPreloads()
   // 分页状态也要重置，否则换账号登录后会接着上一个人的「已加载数量」往下取
   state.total = 0
   state.hasMore = false
@@ -1310,6 +1311,185 @@ function pauseLightboxMedia() {
   if (media) media.pause()
 }
 
+const previewPreloadCache = new Map()
+const PRELOAD_CACHE_LIMIT = 8
+
+function releasePreviewResource(resource) {
+  if (!resource) return
+  if (resource.tagName === 'VIDEO') {
+    resource.pause()
+    resource.removeAttribute('src')
+    resource.load()
+  } else {
+    resource.removeAttribute('src')
+  }
+}
+
+function rememberPreviewPreload(key, resource) {
+  previewPreloadCache.set(key, resource)
+  while (previewPreloadCache.size > PRELOAD_CACHE_LIMIT) {
+    const oldestKey = previewPreloadCache.keys().next().value
+    const oldest = previewPreloadCache.get(oldestKey)
+    previewPreloadCache.delete(oldestKey)
+    releasePreviewResource(oldest)
+  }
+}
+
+function clearPreviewPreloads() {
+  for (const resource of previewPreloadCache.values()) releasePreviewResource(resource)
+  previewPreloadCache.clear()
+}
+
+function crossOriginPreview(resource, src) {
+  try {
+    if (new URL(src, window.location.href).origin !== window.location.origin) {
+      resource.crossOrigin = 'use-credentials'
+    }
+  } catch {
+    /* 配置异常时按普通资源加载 */
+  }
+  return resource
+}
+
+/** 预热相邻照片；相邻视频只预取 metadata，避免提前下载大量视频流量。 */
+function preloadAdjacentPreviews(index) {
+  if (index < 0) return
+  for (const distance of [-2, -1, 1, 2]) {
+    const record = state.files[index + distance]
+    if (!record) continue
+
+    if (record.category === 'image') {
+      const key = `image:${record.id}`
+      if (previewPreloadCache.has(key)) continue
+      const src = apiUrl(`/api/files/${record.id}/raw`)
+      const image = crossOriginPreview(new Image(), src)
+      image.decoding = 'async'
+      image.src = src
+      rememberPreviewPreload(key, image)
+      continue
+    }
+
+    if (record.category === 'video' && Math.abs(distance) === 1) {
+      const key = `video:${record.id}`
+      if (previewPreloadCache.has(key)) continue
+      const src = apiUrl(`/api/files/${record.id}/raw`)
+      const video = crossOriginPreview(document.createElement('video'), src)
+      video.preload = 'metadata'
+      video.muted = true
+      video.src = src
+      video.load()
+      rememberPreviewPreload(key, video)
+    }
+  }
+}
+
+/** 视频缓冲或定位时给出明确状态，并在长时间卡住后自动重连一次。 */
+function setupVideoPlayer(container) {
+  const video = $('video', container)
+  const loading = $('[data-video-loading]', container)
+  const loadingText = $('[data-video-loading-text]', container)
+  if (!video || !loading || !loadingText) return
+
+  const originalSrc = video.getAttribute('src') || ''
+  let recoveryTimer = 0
+  let recoveryAttempts = 0
+  let recovering = false
+
+  const showLoading = (textValue) => {
+    loadingText.textContent = textValue
+    loading.hidden = false
+  }
+  const hideLoading = () => {
+    loading.hidden = true
+    container.classList.remove('has-error')
+  }
+  const clearRecoveryTimer = () => {
+    clearTimeout(recoveryTimer)
+    recoveryTimer = 0
+  }
+
+  const recoverPlayback = () => {
+    if (!video.isConnected || recovering || recoveryAttempts >= 2) return
+    if (!video.seeking && video.paused) return
+    if (video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA && !video.seeking) return
+
+    recovering = true
+    recoveryAttempts += 1
+    const resumeAt = Number.isFinite(video.currentTime) ? video.currentTime : 0
+    const shouldResume = !video.paused && !video.ended
+    showLoading('视频响应超时，正在重新连接…')
+    video.pause()
+
+    const retryUrl = `${originalSrc}${originalSrc.includes('?') ? '&' : '?'}retry=${Date.now()}`
+    video.src = retryUrl
+    video.load()
+    video.addEventListener('loadedmetadata', () => {
+      try {
+        if (resumeAt > 0) video.currentTime = resumeAt
+      } catch {
+        /* 视频时长异常时从头开始 */
+      }
+      if (shouldResume) video.play().catch(() => {})
+      recovering = false
+    }, { once: true })
+  }
+
+  const scheduleRecovery = () => {
+    if (recoveryTimer || recovering || recoveryAttempts >= 2) return
+    recoveryTimer = setTimeout(recoverPlayback, 8000)
+  }
+
+  video.addEventListener('loadstart', () => showLoading('加载视频…'))
+  video.addEventListener('waiting', () => {
+    showLoading('缓冲中…')
+    scheduleRecovery()
+  })
+  video.addEventListener('stalled', () => {
+    showLoading('网络较慢，正在重试…')
+    scheduleRecovery()
+  })
+  video.addEventListener('seeking', () => {
+    showLoading('正在定位…')
+    scheduleRecovery()
+  })
+  video.addEventListener('seeked', () => {
+    if (video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) {
+      clearRecoveryTimer()
+      hideLoading()
+    } else {
+      scheduleRecovery()
+    }
+  })
+  video.addEventListener('progress', () => {
+    if (video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) hideLoading()
+  })
+  video.addEventListener('timeupdate', () => {
+    if (!video.paused) {
+      clearRecoveryTimer()
+      recoveryAttempts = 0
+    }
+  })
+  video.addEventListener('canplay', () => {
+    clearRecoveryTimer()
+    hideLoading()
+  })
+  video.addEventListener('playing', () => {
+    clearRecoveryTimer()
+    recoveryAttempts = 0
+    hideLoading()
+  })
+  video.addEventListener('error', () => {
+    clearRecoveryTimer()
+    container.classList.add('has-error')
+    showLoading('视频加载失败，请下载后播放')
+  })
+
+  if (video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) hideLoading()
+  video.play().catch(() => {
+    if (video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) hideLoading()
+  })
+}
+
 /** 按当前筛选和排序顺序切换上一个 / 下一个文件。 */
 async function navigateLightbox(direction) {
   if (!state.lightboxId || state.lightboxNavigating) return
@@ -1371,7 +1551,14 @@ function openLightbox(id) {
     $('#zoom-controls').hidden = false
     setupImageZoom($('.zoom-img', body))
   } else if (record.category === 'video') {
-    body.innerHTML = `<video src="${raw}" controls autoplay playsinline></video>`
+    body.innerHTML = `<div class="video-preview" data-video-player>
+        <video src="${raw}" controls autoplay preload="auto" playsinline></video>
+        <div class="video-loading" data-video-loading role="status" aria-live="polite">
+          <span class="video-spinner" aria-hidden="true"></span>
+          <span data-video-loading-text>加载视频…</span>
+        </div>
+      </div>`
+    setupVideoPlayer(body)
   } else if (record.category === 'music') {
     body.innerHTML = `<div class="audio-preview" data-audio-player>
         <button class="audio-art" type="button" data-audio-toggle aria-label="播放">
@@ -1411,6 +1598,7 @@ function openLightbox(id) {
   $('#lightbox').hidden = false
   document.body.style.overflow = 'hidden'
   updateLightboxNavigation()
+  preloadAdjacentPreviews(index)
 }
 
 function closeLightbox() {
