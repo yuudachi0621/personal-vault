@@ -216,7 +216,7 @@ function uniqueFiles(fileList) {
  *
  * 改动前端功能时记得同步这里和 package.json。
  */
-const APP_VERSION = '1.6.1'
+const APP_VERSION = '1.6.2'
 
 async function api(path, options = {}) {
   /**

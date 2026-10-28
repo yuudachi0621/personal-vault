@@ -11,12 +11,7 @@
 
 import fs from 'node:fs'
 import { db, mapFile, closeDb } from '../lib/db.js'
-import {
-  generateVideoPreview,
-  isFfmpegAvailable,
-  videoPreviewExists,
-  videoPreviewPath,
-} from '../lib/video-preview.js'
+import { generateVideoPreview, isFfmpegAvailable } from '../lib/video-preview.js'
 
 const args = process.argv.slice(2)
 const force = args.includes('--force')
@@ -61,7 +56,18 @@ let failed = 0
 
 for (const record of records) {
   try {
-    const result = await generateVideoPreview(record, { force })
+    const result = await generateVideoPreview(record, {
+      force,
+      // 长剧集可能转码数小时；命令行任务默认不设置超时。
+      timeoutMs: 0,
+      // 命令行手动执行时使用 ffmpeg 自动线程数；后台自动任务仍默认限制 2 线程。
+      threads: 0,
+      onProgress: ({ bytes, elapsedMs }) => {
+        const minutes = Math.floor(elapsedMs / 60_000)
+        const seconds = Math.floor((elapsedMs % 60_000) / 1000)
+        console.log(`处理中：${record.name} · 已写入 ${(bytes / 1024 / 1024).toFixed(1)} MB · 已用时 ${minutes}分${seconds}秒`)
+      },
+    })
     if (result.generated) {
       const size = fs.statSync(result.path).size
       generated += 1

@@ -62,6 +62,9 @@ npm run preview:videos
 npm run preview:video -- "B260912弱柳扶风118s.mp4"
 ```
 
+长视频通过命令行生成时默认**不设置超时**，每 30 秒输出一次已写入文件大小和已用时间；
+失败或手动中断时会清理未完成的临时预览文件。
+
 默认预览参数为最高 720p、H.264 约 1.8Mbps、AAC 96kbps，适合约 3–5Mbps 的公网上行。
 
 预览副本会额外占用磁盘空间，但不计入原始文件配额；彻底删除原文件时会同步清理预览副本。ffmpeg 处理的是用户上传内容，生产环境应保持 ffmpeg 更新，并让服务以最小权限账号运行。
@@ -71,7 +74,8 @@ npm run preview:video -- "B260912弱柳扶风118s.mp4"
 |---|---|---|
 | `FFMPEG_PATH` | `ffmpeg` | ffmpeg 可执行文件路径 |
 | `AUTO_VIDEO_PREVIEW` | 启用 | 设为 `0` 禁止新上传自动生成 |
-| `VIDEO_PREVIEW_TIMEOUT_MS` | 900000 | 单个视频转码超时 |
+| `VIDEO_PREVIEW_TIMEOUT_MS` | 7200000 | 后台自动转码超时；设为 `0` 不限制。命令行脚本固定不超时 |
+| `VIDEO_PREVIEW_THREADS` | 2 | 后台自动转码线程数；命令行脚本使用 ffmpeg 自动线程数 |
 
 ### Nginx 视频流配置
 
@@ -98,7 +102,7 @@ location /api/files/ {
 - 文件没变：返回 304，不重复下载。
 - 部署了新文件并重启：ETag 改变，浏览器自动获取新版，不需要用户手动清除缓存。
 
-`index.html` 里还通过 `?v=1.6.1` 引用前端资源。发布新版本时请同步更新
+`index.html` 里还通过 `?v=1.6.2` 引用前端资源。发布新版本时请同步更新
 `package.json`、`public/app.js` 的 `APP_VERSION` 和这三个查询串；这样即使旧浏览器
 仍缓存着上一版脚本，也会因为 URL 变化立刻请求新文件。
 
