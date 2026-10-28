@@ -48,6 +48,7 @@ import {
   describeRegistration,
   CONFIG_JUST_CREATED,
   REGISTRATION_CODE,
+  requestProtocol,
 } from './lib/config.js'   // 部署配置
 import {
   migrationResult,
@@ -91,6 +92,11 @@ const server = http.createServer(async (req, res) => {
   res.setHeader('X-Content-Type-Options', 'nosniff')   // 不许浏览器「猜」文件类型
   res.setHeader('Referrer-Policy', 'same-origin')      // 跳走时不泄露来源地址
   res.setHeader('X-Frame-Options', 'SAMEORIGIN')       // 禁止别的站点用 iframe 嵌本页
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()')
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin')
+  if (requestProtocol(req) === 'https') {
+    res.setHeader('Strict-Transport-Security', 'max-age=15552000; includeSubDomains')
+  }
 
   /**
    * try / catch —— 兜住意外错误。

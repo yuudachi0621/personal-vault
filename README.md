@@ -36,7 +36,7 @@
 - 文件没变：返回 304，不重复下载。
 - 部署了新文件并重启：ETag 改变，浏览器自动获取新版，不需要用户手动清除缓存。
 
-`index.html` 里还通过 `?v=1.4.5` 引用前端资源。发布新版本时请同步更新
+`index.html` 里还通过 `?v=1.5.0` 引用前端资源。发布新版本时请同步更新
 `package.json`、`public/app.js` 的 `APP_VERSION` 和这三个查询串；这样即使旧浏览器
 仍缓存着上一版脚本，也会因为 URL 变化立刻请求新文件。
 
@@ -99,7 +99,7 @@ PORT=8787 node server.js
 window.VAULT_CONFIG = { apiBase: 'https://api.example.com' }
 ```
 
-留空字符串即表示同源。也可以在 `index.html` 里直接覆盖，不改文件。
+留空字符串即表示同源。页面启用了严格 CSP，不再支持在 `index.html` 里写内联脚本覆盖配置。
 
 **3. 必须部署在 HTTPS 下**
 
@@ -120,6 +120,10 @@ window.VAULT_CONFIG = { apiBase: 'https://api.example.com' }
 > 来源校验对所有 `/api/**` 请求生效：只要带 `Origin` 头且不在同源或白名单内，直接 403。
 > 这不只是 CORS 礼貌，也是 Cookie 放宽到 `SameSite=None` 之后的 CSRF 兜底。
 
+> 如果由本服务托管 `index.html`，但 `apiBase` 指向另一个域名，需要同步调整
+> `lib/static.js` 的 `HTML_CSP.connect-src`，把这个 API 域名加入白名单；
+> 前端完全由 CDN / 独立静态服务器托管时，则由那台服务器设置 CSP。
+
 ---
 
 ## 部署到服务器需要哪些文件
@@ -130,11 +134,11 @@ window.VAULT_CONFIG = { apiBase: 'https://api.example.com' }
 server.js               入口
 package.json            提供 "type": "module"，见下方说明
 config.example.json     配置模板（真实配置 config.json 首次启动自动生成）
-lib/                    9 个文件：config cors db paths media store auth api static
+lib/                    10 个文件：config cors db paths media rate-limit store auth api static
 public/                 5 个文件：index.html app.js styles.css config.js favicon.svg
 ```
 
-一共 17 个文件。项目**零第三方依赖，不需要 `npm install`，也没有 `node_modules`**。
+一共 18 个文件。项目**零第三方依赖，不需要 `npm install`，也没有 `node_modules`**。
 SQLite 用的是 Node 22 内置的 `node:sqlite`，同样不需要装任何东西。
 
 > **Node 版本要求提高到 ≥ 22.5**（`node:sqlite` 从这个版本开始提供）。
@@ -210,12 +214,13 @@ server.js             HTTP 服务入口（单端口，绑定 0.0.0.0）
 lib/config.js         部署配置：跨域白名单、Cookie 策略、容量限额
 lib/cors.js           CORS 响应头与预检处理
 lib/paths.js          路径常量（单独一层，避免模块循环依赖）
-lib/media.js          MIME 补全与照片 / 视频 / 音乐分类规则
+lib/media.js          MIME 补全、分类与安全内联类型判断
+lib/rate-limit.js     登录 / 注册 / 上传等敏感接口的内存限流
 lib/db.js             SQLite 连接、建表、内容哈希索引、旧数据迁移
 lib/store.js          数据访问层（所有 SQL 都集中在这里）
 lib/auth.js           scrypt 密码哈希、HMAC 会话令牌、Cookie 构造
 lib/api.js            业务接口：认证、上传、下载、列表、删除
-lib/static.js         静态资源服务（含 SPA 回落与目录穿越防护）
+lib/static.js         静态资源、CSP、ETag 与目录穿越防护
 public/config.js      前端部署配置（apiBase）
 public/index.html     前端页面结构
 public/app.js         前端逻辑（所有请求统一经 apiUrl() 拼地址）
@@ -475,13 +480,29 @@ if (record.ownerId !== ownerId) return null   // 是别人的 → 也当作不�
 
 ## 数据安全说明
 
-- 密码仅以 scrypt 加盐哈希形式存储，明文永不落盘。
-- 会话使用 HMAC-SHA256 签名的 HttpOnly Cookie，30 天有效；签名密钥首次启动生成并保存在 `data/secret.key`。
+- 密码使用 scrypt 加盐哈希存储，新密码限制为 8–128 位，明文永不落盘。
+- 会话使用 HMAC-SHA256 签名的 HttpOnly Cookie，30 天有效；签名密钥首次启动生成并保存在 `data/secret.key`，启动时会校验格式。
+- 令牌包含会话版本；修改密码会递增版本并撤销其它设备上的旧会话。升级到 1.5.0 后旧版本令牌会失效一次，需要重新登录。
 - 存储文件名由服务端生成（UUID + 安全扩展名），不直接使用用户原始文件名，杜绝路径穿越。
 - 所有文件类接口先校验登录态，再校验记录归属；非本人记录按「不存在」响应，不泄露他人内容的存在性。
 - 所有 SQL 都用参数化查询，唯一拼进 SQL 的是排序方式，且取自写死的白名单（防 SQL 注入）。
+- 只有安全的图片 / 音频 / 视频类型允许内联预览；HTML、SVG、XML、PDF 等主动内容一律以 `application/octet-stream` 附件下载，防止同源存储型 XSS。
+- 页面启用 CSP、`X-Frame-Options`、`nosniff`、Permissions-Policy 和 HTTPS 下的 HSTS。
 - 上传体积在上限处即时中断并清理半成品文件；上传长时间无数据会自动断开（默认 60 秒）。
+- 登录、注册、改密、普通 API 和上传都有内存限流；单用户最多同时进行 4 个上传，进程总量最多 32 个。
 - 前置反向代理时记得传 `X-Forwarded-Proto`，否则同源 HTTPS 部署下 Cookie 不会带 `Secure`。
+- 如果前面是 Nginx / Cloudflare，设置 `TRUST_PROXY=1`，限流才会使用真实客户端 IP；前提是代理必须覆盖并清洗 `X-Forwarded-For` / `CF-Connecting-IP`，否则客户端可以伪造 IP 绕过限流。
+- 应用层限流不能抵御大流量 DDoS，生产环境仍应在 Cloudflare / Nginx 层配置连接数、请求速率和区域访问策略。
+- `data/`、`uploads/` 在支持的平台上会收紧到 `0700`，数据库和签名密钥为 `0600`，避免同机其他系统账号直接读取。
+
+### 安全边界与剩余风险
+
+- **限流是单进程内存限流**：重启会清空计数，多进程部署时各进程独立计数。对外服务应同时在 Cloudflare / Nginx 配置限速。
+- **大流量 DDoS 不能只靠 Node 解决**：带宽型攻击、海量分布式 IP 仍需 CDN、WAF、连接数和区域策略。
+- **退出登录只清除当前浏览器 Cookie**：无状态令牌在到期前仍可能被已窃取的副本使用；怀疑令牌泄露时应立即修改密码，修改密码会撤销其它旧会话。
+- **上传内容不做病毒扫描**：本站只按 MIME / 扩展名选择安全的下载方式，不保证文件本身不含恶意代码；不要公开分享下载链接。
+- **开放注册就是安全边界变化**：将 `registrationCode` 设为空等于允许互联网用户注册，应配合更严格的配额和 WAF 策略。
+- **系统账号被攻破时应用无法自保**：数据库、签名密钥和上传目录必须依赖服务器本身的操作系统权限与备份安全。
 
 ### 容量防护
 
@@ -535,9 +556,9 @@ if (record.ownerId !== ownerId) return null   // 是别人的 → 也当作不�
   放在查重之后，没有注册码的人就能靠「邮箱已注册」这个提示批量探测哪些邮箱注册过本站。
 - 前端通过 `GET /api/auth/config` 拿一个布尔值来决定显不显示输入框，
   **服务端从不把注册码本身下发给前端**。
-- 已有的老账号不受影响，登录照常。
+- 已有的老账号密码不变，可以照常登录；升级到 1.5.0 后旧会话令牌会失效一次。
 
-> ⚠️ 注册接口没有失败次数限制，注册码理论上可被暴力枚举。
+> 注册接口现在限制同一来源每小时最多 10 次注册请求，但注册码仍应使用随机值。
 > 自动生成的码是 12 位（约 2^60 种组合），足够安全；**手动改的话别用 `123456` 这种**。
 
 ## 改造时容易漏的点

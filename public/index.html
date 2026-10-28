@@ -31,8 +31,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#faf9f5">
   <title>个人云存储 · 视频 / 照片 / 文件</title>
-  <link rel="icon" href="/favicon.svg?v=1.4.5">
-  <link rel="stylesheet" href="/styles.css?v=1.4.5">
+  <link rel="icon" href="/favicon.svg?v=1.5.0">
+  <link rel="stylesheet" href="/styles.css?v=1.5.0">
 </head>
 
 <body>
@@ -75,7 +75,7 @@
           </label>
           <label class="field">
             <span>密码</span>
-            <input type="password" name="password" required minlength="6" placeholder="至少 6 位"
+            <input type="password" name="password" required maxlength="128" placeholder="输入密码"
               autocomplete="current-password">
           </label>
           <p class="form-error" data-error hidden></p>
@@ -94,7 +94,7 @@
           </label>
           <label class="field">
             <span>密码</span>
-            <input type="password" name="password" required minlength="6" placeholder="至少 6 位"
+            <input type="password" name="password" required minlength="8" maxlength="128" placeholder="至少 8 位"
               autocomplete="new-password">
           </label>
           <!-- 默认隐藏，只有 config.json 里配置了 registrationCode 时才显示（见 app.js 的 loadAuthConfig） -->
@@ -392,8 +392,8 @@
       <form id="password-form" class="modal-body">
         <label class="field"><span>当前密码</span><input type="password" name="oldPassword" required
             autocomplete="current-password"></label>
-        <label class="field"><span>新密码</span><input type="password" name="newPassword" required minlength="6"
-            placeholder="至少 6 位" autocomplete="new-password"></label>
+        <label class="field"><span>新密码</span><input type="password" name="newPassword" required minlength="8" maxlength="128"
+            placeholder="至少 8 位" autocomplete="new-password"></label>
         <p class="form-error" data-error hidden></p>
         <div class="modal-actions">
           <button class="btn btn-ghost" type="button" data-close>取消</button>
@@ -405,8 +405,8 @@
 
   <div id="toasts" class="toasts" aria-live="polite"></div>
 
-  <script src="/config.js?v=1.4.5"></script>
-  <script src="/app.js?v=1.4.5"></script>
+  <script src="/config.js?v=1.5.0"></script>
+  <script src="/app.js?v=1.5.0"></script>
 </body>
 
 </html>
