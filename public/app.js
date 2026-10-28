@@ -210,7 +210,7 @@ function uniqueFiles(fileList) {
  *
  * 改动前端功能时记得同步这里和 package.json。
  */
-const APP_VERSION = '1.5.2'
+const APP_VERSION = '1.5.3'
 
 async function api(path, options = {}) {
   /**
@@ -1394,6 +1394,7 @@ function setupVideoPlayer(container) {
   let recoveryTimer = 0
   let recoveryAttempts = 0
   let recovering = false
+  let lastActivityAt = Date.now()
 
   const showLoading = (textValue) => {
     loadingText.textContent = textValue
@@ -1412,8 +1413,14 @@ function setupVideoPlayer(container) {
     if (!video.isConnected || recovering || recoveryAttempts >= 2) return
     if (!video.seeking && video.paused) return
     if (video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA && !video.seeking) return
+    // 慢速网络只要仍在持续收到数据，就不要误判为卡死并重启连接
+    if (Date.now() - lastActivityAt < 8000) {
+      scheduleRecovery()
+      return
+    }
 
     recovering = true
+    lastActivityAt = Date.now()
     recoveryAttempts += 1
     const resumeAt = Number.isFinite(video.currentTime) ? video.currentTime : 0
     const shouldResume = !video.paused && !video.ended
@@ -1430,16 +1437,23 @@ function setupVideoPlayer(container) {
         /* 视频时长异常时从头开始 */
       }
       if (shouldResume) video.play().catch(() => {})
+      lastActivityAt = Date.now()
       recovering = false
     }, { once: true })
   }
 
   const scheduleRecovery = () => {
     if (recoveryTimer || recovering || recoveryAttempts >= 2) return
-    recoveryTimer = setTimeout(recoverPlayback, 8000)
+    recoveryTimer = setTimeout(() => {
+      recoveryTimer = 0
+      recoverPlayback()
+    }, 8000)
   }
 
-  video.addEventListener('loadstart', () => showLoading('加载视频…'))
+  video.addEventListener('loadstart', () => {
+    lastActivityAt = Date.now()
+    showLoading('加载视频…')
+  })
   video.addEventListener('waiting', () => {
     showLoading('缓冲中…')
     scheduleRecovery()
@@ -1461,19 +1475,25 @@ function setupVideoPlayer(container) {
     }
   })
   video.addEventListener('progress', () => {
+    lastActivityAt = Date.now()
+    clearRecoveryTimer()
     if (video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) hideLoading()
+    else if (!video.paused || video.seeking) scheduleRecovery()
   })
   video.addEventListener('timeupdate', () => {
     if (!video.paused) {
+      lastActivityAt = Date.now()
       clearRecoveryTimer()
       recoveryAttempts = 0
     }
   })
   video.addEventListener('canplay', () => {
+    lastActivityAt = Date.now()
     clearRecoveryTimer()
     hideLoading()
   })
   video.addEventListener('playing', () => {
+    lastActivityAt = Date.now()
     clearRecoveryTimer()
     recoveryAttempts = 0
     hideLoading()
