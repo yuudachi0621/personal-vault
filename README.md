@@ -282,6 +282,15 @@ icp: {
 
 只有 `enabled` 为 `true` 且 `number` 非空时才显示页脚；备案号会以纯文本插入，链接只接受 `http:` / `https:`，非法地址回退到工信部备案查询页。
 
+### 静态资源缓存
+
+- `index.html` 继续使用 `no-cache, must-revalidate`，确保部署后立即读取新版页面。
+- `config.js` 可能独立修改备案信息或 API 地址，因此也保持实时校验。
+- 带 `?v=` 版本参数的 `app.js`、`styles.css` 和图标使用一年期 `immutable` 强缓存。
+- 发布新版本时必须同步更新 `package.json`、`APP_VERSION` 和 `index.html` 中的 `?v=`。
+- 这样升级后会自动使用新 URL，同时快速刷新不会重复下载未变化的脚本和样式。
+- 登录状态确认后，主界面、普通文件列表和隐私锁定请求并行执行；进入隐私空间前仍会等待锁定完成，兼顾刷新速度与安全。
+
 ### 3. 环境变量
 
 #### 服务与部署
@@ -514,6 +523,7 @@ API 默认返回 JSON，错误格式为：
 - 文件名不直接用于磁盘路径；磁盘名使用随机 UUID + 安全扩展名。
 - HTML / SVG / XML / PDF 等主动内容不会安全内联，统一按附件下载。
 - 静态文件防目录穿越；HTML 设置 CSP；全站设置 `nosniff`、`SAMEORIGIN`、Permissions-Policy。
+- CSP 仅放行 Cloudflare Web Analytics 的官方脚本和上报域名，不使用 `unsafe-inline`。
 - 浏览器请求校验 Origin / Sec-Fetch-Site；跨域来源必须列入 `ALLOWED_ORIGINS`。
 - 上传使用流式计数和空闲超时，超限会删除半成品。
 - 隐私文件重复上传提示不会泄露私有名称。

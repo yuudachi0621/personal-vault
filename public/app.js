@@ -139,6 +139,7 @@ let privacyAuthResolver = null
 let privacyAuthMode = 'unlock'
 let privacyHeartbeatAt = 0
 let privacyHeartbeatPromise = null
+let privacyReloadLockPromise = null
 try {
   const savedQuality = localStorage.getItem(VIDEO_QUALITY_KEY)
   if (['720p', 'original'].includes(savedQuality)) state.videoQuality = savedQuality
@@ -257,7 +258,7 @@ function uniqueFiles(fileList) {
  *
  * 改动前端功能时记得同步这里和 package.json。
  */
-const APP_VERSION = '1.8.2'
+const APP_VERSION = '1.8.4'
 
 /**
  * 调用后端 JSON API，并把非 2xx 响应转换为异常。
@@ -480,6 +481,9 @@ function openPrivacyAuthDialog() {
 }
 
 async function requestPrivacyUnlock() {
+  // 刷新后的锁定请求可能与主界面并行；任何隐私操作都要先等它落地，
+  // 避免旧隐私 Cookie 与新解锁 Cookie 发生覆盖竞态。
+  if (privacyReloadLockPromise) await privacyReloadLockPromise
   if (state.privacyUnlocked) return true
   return openPrivacyAuthDialog()
 }
@@ -2631,10 +2635,14 @@ async function boot() {
      */
     const { user } = await api('/api/auth/me')
     state.user = user
-    // 刷新 / 重新打开页面后必须重新输入隐私密码。服务端 Cookie 不能跨页面加载续用。
-    await api('/api/privacy/lock', { method: 'POST' }).catch(() => {})
+    // 刷新 / 重新打开页面后必须重新输入隐私密码。锁定与主界面、普通文件列表
+    // 可以并行执行；真正进入隐私空间时 requestPrivacyUnlock() 会等待锁定完成。
+    privacyReloadLockPromise = api('/api/privacy/lock', { method: 'POST' })
+      .catch(() => {})
+      .finally(() => { privacyReloadLockPromise = null })
     showApp()
     await refresh()   // 登录状态确认后，才去加载文件列表
+    await privacyReloadLockPromise
   } catch {
     // 走到这里说明没登录（或令牌过期、服务器出错），一律退回登录页
     showAuth()
