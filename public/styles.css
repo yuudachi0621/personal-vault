@@ -414,6 +414,9 @@ body.has-site-footer .app { min-height: calc(100dvh - 40px); }
 
 .transfer-task:hover { border-color: var(--border-strong); }
 .transfer-task.is-completed { background: color-mix(in srgb, var(--surface) 82%, var(--brand-soft)); }
+.transfer-task.is-skipped { background: var(--bg-soft); }
+.transfer-task.is-skipped .transfer-track i { background: var(--amber); }
+.transfer-task.is-skipped .transfer-status { color: var(--muted); }
 .transfer-task.is-failed { border-color: #ead5cf; }
 .transfer-task.is-paused { background: var(--bg-soft); }
 

@@ -18,7 +18,7 @@ const MAX_PARALLEL_UPLOADS = 2
 const UPLOAD_STORE_PREFIX = 'personal-vault:uploads:'
 const DOWNLOAD_STORE_PREFIX = 'personal-vault:downloads:'
 const TRANSFER_RENDER_DELAY_MS = 120
-const TERMINAL_TRANSFER_STATUSES = new Set(['completed', 'cancelled', 'external'])
+const TERMINAL_TRANSFER_STATUSES = new Set(['completed', 'cancelled', 'external', 'skipped'])
 
 const transfers = {
   ownerId: null,
@@ -113,6 +113,7 @@ function transferStatusText(task) {
   if (task.status === 'paused') return '已暂停，可继续'
   if (task.status === 'failed') return '传输失败'
   if (task.status === 'completed') return '已完成'
+  if (task.status === 'skipped') return '已存在，已跳过'
   if (task.status === 'cancelled') return '已取消'
   if (task.status === 'external') return '已交给浏览器下载'
   return '等待中'
@@ -164,7 +165,7 @@ function transferTaskHtml(task) {
   const speed = task.status === 'running' && task.speed > 0 ? ` · ${formatSize(task.speed)}/s` : ''
   const statusError = ['failed', 'paused'].includes(task.status) && task.error
   const note = task.error ? `<p class="transfer-note${statusError ? ' is-error' : ''}">${escapeHtml(task.error)}</p>` : ''
-  const stateClass = ['completed', 'failed', 'paused'].includes(task.status) ? ` is-${task.status}` : ''
+  const stateClass = ['completed', 'failed', 'paused', 'skipped'].includes(task.status) ? ` is-${task.status}` : ''
 
   return `<article class="transfer-task${stateClass}" data-kind="${task.kind}" data-task-id="${escapeHtml(task.id)}">
     <div class="transfer-kind-icon">${transferIcon(task.kind)}</div>
@@ -797,10 +798,11 @@ async function handleUploadFailure(task, error) {
     return
   }
   if (code === 'DUPLICATE_FILE') {
-    task.status = 'failed'
-    task.error = error.message
+    task.status = 'skipped'
+    task.error = '账号中已存在相同内容，本次上传已跳过'
     task.retryable = false
     task.uploadId = null
+    task.file = null
     resetTransferSpeed(task)
     persistUploadTasks()
     return
