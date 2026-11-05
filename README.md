@@ -29,17 +29,18 @@
 | 用户体系 | 邮箱 + 密码注册、登录、退出、修改账号密码 |
 | 注册控制 | 通过 `config.json` 的 `registrationCode` 决定必须填写注册码还是开放注册 |
 | 文件分类 | 服务端根据扩展名 / MIME 自动归入照片、视频、音乐、文件；SVG 按普通文件处理 |
-| 上传 | 选择或拖拽、多选、进度提示、流式写盘、SHA-256 内容去重 |
+| 上传 | 选择或拖拽、多选、8MiB 分块续传、暂停 / 继续 / 取消、SHA-256 内容去重 |
 | 文件列表 | 分类、文件名搜索、四种排序、分页加载 |
 | 预览 | 图片缩放 / 平移 / 相邻预加载、自定义音频播放器、视频 720P / 原画切换 |
 | 媒体封面 | FFmpeg 生成并缓存照片 / 视频小尺寸 JPEG；失败时回退原图或视频取帧 |
 | 视频流 | HTTP Range、206 分段响应、ETag、慢速缓冲状态与有限次数自动重连 |
-| 下载 | 保留原始文件名，支持 Range；下载内容始终使用原始文件 |
+| 下载 | 保留原始文件名；支持 Range 分块下载、暂停 / 继续 / 取消；不支持 File System Access API 时回退普通下载 |
 | 回收站 | 普通文件软删除、24 小时内恢复、到期或手动彻底删除 |
 | 隐私空间 | 独立隐私密码、账号密码验证重置、短时解锁、隐私文件永久删除 |
 | 备案信息 | 可在前端配置中开启 ICP 备案页脚，显示备案号并链接工信部备案查询 |
 | 存储统计 | 普通用量、分类用量、回收站和隐私空间独立展示；配额包含回收站与隐私文件 |
 | 部署 | 单进程一体部署，或静态前端 + 独立 API 的跨域部署 |
+| 传输中心 | 独立传输页集中显示上传 / 下载任务、进度、速度、状态和批量操作 |
 | 响应式 | 桌面侧栏、平板和手机布局 |
 
 ### 预览与媒体
@@ -62,7 +63,21 @@
 - 每个用户最多同时上传 4 个文件，进程总计最多 32 个。
 - 上传进度提示支持长文件名自动换行，最多显示三行，并保留完整名称供悬停查看。
 
-### 回收站
+#### 传输中心与断点续传
+
+- 侧栏「传输」页面集中显示正在上传、正在下载以及最近完成或失败的传输任务，支持暂停、继续、取消、全部暂停、全部继续和清除已完成记录。
+- 新上传使用 `POST /api/uploads` 创建会话，再以 8MiB 分块发送；服务端在 `data/upload-sessions/<ownerId>/` 保存临时的 `.part` 文件和会话元数据。
+- 上传会话 24 小时无活动后过期，由回收站清扫任务一并清理。每用户最多同时保留 4 个上传会话，前端默认并发 3 个。
+- 会话在创建时会预留完整文件大小；容量判断会同时计入已用空间、其它未完成会话的预留空间和新会话大小。
+- 每个分块只在完整写盘后原子更新偏移量；异常中断时会把 `.part` 截断回最后一次确认的偏移，避免重复或损坏内容进入正式文件。
+- 页面刷新后仍会显示未完成上传，但浏览器无法静默重新获取本地 File 对象，必须重新选择文件名、大小和修改时间一致的原文件后才能续传。
+- 可续传下载使用浏览器 File System Access API 和 HTTP `Range`，每段 8MiB，直接写入用户选择的本地文件；暂停后从已确认偏移继续。
+- 下载任务元数据保存在 `localStorage`，文件句柄保存在 IndexedDB。刷新页面后，浏览器可能要求重新授予目标文件写入权限。
+- Firefox 或未启用 File System Access API 的浏览器会回退为浏览器自身的普通下载；普通下载无法在页面内暂停或续传。
+- 上传和下载任务都只记录传输元数据，不记录文件内容；服务端临时文件仍需遵守磁盘空间和用户配额限制。
+- 隐私传输任务在隐私空间锁定时会自动暂停并隐藏，重新解锁后才恢复显示。
+
+## 回收站
 
 - 普通文件删除时只写 `deleted_at`，不会立即删除磁盘文件。
 - 24 小时内可恢复；后台每 10 分钟扫描一次过期记录并清理。
@@ -88,7 +103,7 @@
 ```text
 浏览器
   │
-  ├─ GET /、/styles.css、/app.js …… ──> server.js ──> lib/static.js
+  ├─ GET /、/styles.css、/app.js、/transfers.js …… ──> server.js ──> lib/static.js
   │
   └─ /api/** ─────────────────────────> lib/api.js
                                            ├─ lib/config.js       部署、CORS、Cookie、容量
@@ -107,7 +122,8 @@
 关键设计：
 
 - `server.js` 只负责进程启动、安全响应头、CORS / API / 静态资源分流和优雅退出。
-- `lib/api.js` 集中处理认证、文件、回收站、隐私空间与上传流。
+- `lib/api.js` 集中处理认证、文件、回收站、隐私空间与分块上传接口；`lib/upload-session.js` 管理可续传临时会话。
+- `public/app.js` 负责主界面和文件列表，`public/transfers.js` 独立维护上传 / 下载任务队列与传输页。
 - `lib/store.js` 封装全部 SQL，文件查询都带 `owner_id` 条件。
 - 普通登录 Cookie 与隐私解锁 Cookie 分离；隐私文件需要同时满足登录和隐私解锁校验。
 - 原文件只读。视频 720P 副本单独存放，删除原文件时同步清理副本。
@@ -124,7 +140,8 @@
 ├─ LICENSE                           MIT License
 ├─ README.md
 ├─ lib/
-│  ├─ api.js                         认证、文件、上传、回收站、隐私空间 API
+│  ├─ api.js                         认证、文件、分块上传、回收站、隐私空间 API
+│  ├─ upload-session.js              断点续传上传会话、临时分块与过期清理
 │  ├─ auth.js                        scrypt 哈希、HMAC 令牌、Cookie
 │  ├─ config.js                      模式、CORS、Cookie、容量和站点配置
 │  ├─ cors.js                        CORS 响应与 OPTIONS 预检
@@ -138,7 +155,8 @@
 │  └─ media-thumbnail.js             照片 / 视频封面生成、缓存与回退
 ├─ public/
 │  ├─ index.html
-│  ├─ app.js
+│  ├─ app.js                         主界面、登录、文件列表、预览与文件操作
+│  ├─ transfers.js                   上传 / 下载任务队列与传输页面
 │  ├─ styles.css
 │  ├─ config.js                      前端 API 地址配置
 │  └─ favicon.svg
@@ -160,6 +178,7 @@ Unix 系统上，`data/` 和 `uploads/` 会尝试收紧到 `0700`，数据库与
 - Node.js **22.5 或更高**。项目使用 `node:sqlite`；低于该版本会直接提示升级并退出。
 - 一个可写的项目目录，用于生成 `config.json` 和 `data/`。
 - 支持现代 ES Modules、Fetch、Pointer Events 的浏览器。
+- 页面内可暂停 / 续传的下载依赖 File System Access API（Chrome / Edge 等）；不支持时自动回退普通下载。
 
 ### 可选
 
@@ -287,7 +306,7 @@ icp: {
 
 - `index.html` 继续使用 `no-cache, must-revalidate`，确保部署后立即读取新版页面。
 - `config.js` 可能独立修改备案信息或 API 地址，因此也保持实时校验。
-- 带 `?v=` 版本参数的 `app.js`、`styles.css` 和图标使用一年期 `immutable` 强缓存。
+- 带 `?v=` 版本参数的 `app.js`、`transfers.js`、`styles.css` 和图标使用一年期 `immutable` 强缓存。
 - 发布新版本时必须同步更新 `package.json`、`APP_VERSION` 和 `index.html` 中的 `?v=`。
 - 这样升级后会自动使用新 URL，同时快速刷新不会重复下载未变化的脚本和样式。
 - 登录状态确认后，主界面、普通文件列表和隐私锁定请求并行执行；进入隐私空间前仍会等待锁定完成，兼顾刷新速度与安全。
@@ -355,6 +374,7 @@ npm run preview:video -- "7b694feb-ca1b-4e6b-a665-c146c43cd0ff"
 |---|---|
 | `data/vault.db` | 用户、文件元数据、隐私状态、哈希与版本 |
 | `data/uploads/<ownerId>/` | 原始文件，磁盘名由随机 UUID + 安全扩展名组成 |
+| `data/upload-sessions/<ownerId>/` | 未完成上传的会话元数据和 `.part` 临时文件；24 小时无活动后自动清理 |
 | `data/previews/<ownerId>/<fileId>.mp4` | 可选 720P 播放副本 |
 | `data/previews/<ownerId>/<fileId>.mp4.skip.json` | 已确认“无法生成更小副本”的跳过标记 |
 | `data/previews/<ownerId>/<fileId>.thumb.jpg` | 照片 / 视频列表封面缓存，最大 640px |
@@ -474,7 +494,11 @@ API 默认返回 JSON，错误格式为：
 | GET | `/api/auth/me` | 当前用户 |
 | PATCH | `/api/auth/password` | 修改账号密码，撤销旧会话 |
 | GET | `/api/files` | 普通文件列表：`category` / `q` / `sort` / `limit` / `offset` |
-| POST | `/api/files/upload?name=...` | 上传；隐私视图附加 `private=1` |
+| POST | `/api/files/upload?name=...` | 兼容接口：一次性流式上传；隐私视图附加 `private=1` |
+| POST | `/api/uploads` | 创建可续传上传会话，返回会话 ID、偏移量和分块大小 |
+| GET / HEAD | `/api/uploads/:id` | 查询上传会话的当前偏移量和过期时间 |
+| PATCH | `/api/uploads/:id` | 追加一个分块；请求头使用 `Upload-Offset`，最后一块完成后自动入库 |
+| DELETE | `/api/uploads/:id` | 取消上传会话并删除临时文件 |
 | GET / HEAD | `/api/files/:id/raw` | 原始文件，支持 Range |
 | GET / HEAD | `/api/files/:id/download` | 附件下载，支持 Range |
 | GET / HEAD | `/api/files/:id/preview` | 720P 副本；不存在时回退原文件 |
@@ -527,6 +551,8 @@ API 默认返回 JSON，错误格式为：
 - CSP 仅放行 Cloudflare Web Analytics 的官方脚本和上报域名，不使用 `unsafe-inline`。
 - 浏览器请求校验 Origin / Sec-Fetch-Site；跨域来源必须列入 `ALLOWED_ORIGINS`。
 - 上传使用流式计数和空闲超时，超限会删除半成品。
+- 分块上传会话按用户隔离；临时文件使用 `0600`、会话目录使用 `0700` 权限位（Windows 忽略 POSIX 权限位）。
+- 上传会话在完整写盘后才推进偏移量；中断时会回滚未确认的分块，最终文件仍使用原内容哈希去重。
 - 隐私文件重复上传提示不会泄露私有名称。
 
 ### 内存限流
@@ -542,8 +568,9 @@ API 默认返回 JSON，错误格式为：
 | 注册 | 每 IP 10 次/小时 |
 | 修改账号密码 | 每用户 10 次/15 分钟 |
 | 隐私设置 / 解锁 / 重置 | 每用户各 10 次/15 分钟 |
-| 上传请求 | 每用户 120 次/小时 |
-| 并发上传 | 每用户 4 个，进程总计 32 个 |
+| 创建上传会话 | 每用户 120 次/小时 |
+| 上传分块 | 每用户 5000 次/小时 |
+| 并发上传 | 每用户 4 个，进程总计 32 个；前端默认并发 3 个 |
 
 生产环境仍应在 Nginx / Cloudflare 层配置连接数、请求速率和 DDoS 防护。
 
@@ -662,6 +689,7 @@ server {
 node --check server.js
 Get-ChildItem lib -Filter *.js | ForEach-Object { node --check $_.FullName }
 node --check public/app.js
+node --check public/transfers.js
 node --check scripts/optimize-video-previews.mjs
 git diff --check
 ```
@@ -672,6 +700,7 @@ git diff --check
 node --check server.js
 for file in lib/*.js; do node --check "$file" || exit 1; done
 node --check public/app.js
+node --check public/transfers.js
 node --check scripts/optimize-video-previews.mjs
 git diff --check
 ```
@@ -682,12 +711,15 @@ git diff --check
 2. 注册、退出、重新登录。
 3. 上传照片、视频、音乐、普通文件并确认分类。
 4. 测试搜索、排序、分页、重命名和下载。
-5. 普通文件删除到回收站、恢复、彻底删除。
-6. 大照片与视频封面缓存、图片缩放 / 平移、音频播放、视频拖动和清晰度切换。
-7. 设置隐私密码、移入 / 移出隐私文件，确认普通列表不可见。
-8. 刷新页面后确认隐私空间重新锁定。
-9. 修改账号密码后确认旧隐私解锁失效。
-10. 验证 FFmpeg 可用和不可用两种视频播放路径。
+5. 上传大于 16MiB 的文件，在首个分块后暂停，确认继续后下载内容的 SHA-256 与原文件一致。
+6. 刷新页面后重新选择原文件，确认上传从服务端已有偏移继续；取消任务后确认临时会话消失。
+7. 在支持 File System Access API 的浏览器下载大文件，暂停、继续并校验目标文件 SHA-256；再验证不支持该 API 时的普通下载回退。
+8. 普通文件删除到回收站、恢复、彻底删除。
+9. 大照片与视频封面缓存、图片缩放 / 平移、音频播放、视频拖动和清晰度切换。
+10. 设置隐私密码、移入 / 移出隐私文件，确认普通列表不可见。
+11. 刷新页面后确认隐私空间重新锁定。
+12. 修改账号密码后确认旧隐私解锁失效。
+13. 验证 FFmpeg 可用和不可用两种视频播放路径。
 
 ## 已知边界与待确认事项
 
@@ -698,6 +730,8 @@ git diff --check
 - 账号密码没有网页端找回流程；隐私密码只能在仍记得账号密码时重置。
 - 没有文件病毒扫描、内容审核、版本历史、文件夹层级或分享链接。
 - 单进程限流不适用于多实例部署。
+- 页面内断点续传下载依赖 File System Access API；Firefox / Safari 等回退路径无法显示浏览器自身的实时下载进度。
+- 页面刷新后上传任务必须重新选择原文件，下载任务能否无提示继续取决于浏览器对已保存文件句柄权限的策略。
 - `MAX_USER_BYTES` / `MIN_FREE_BYTES` 等环境变量缺少非法数值启动校验，部署时需人工确认。
 
 ## 许可证

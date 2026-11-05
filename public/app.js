@@ -118,6 +118,33 @@ const state = {
   videoQuality: '720p', // 视频播放清晰度：720p / original
   privacyMode: false,
   privacyUnlocked: false,
+  transferMode: false, // 是否正在查看独立的传输任务页面
+}
+
+/**
+ * 传输模块需要的宿主能力。
+ *
+ * transfers.js 独立加载，只通过这个对象访问主脚本的状态和公共函数；这样上传、
+ * 下载队列不会继续膨胀 app.js，同时仍能复用登录、隐私解锁、刷新和提示逻辑。
+ */
+window.VaultTransferHost = {
+  state,
+  api,
+  apiUrl,
+  $,
+  $$,
+  escapeHtml,
+  formatSize,
+  fileSignature,
+  uniqueFiles,
+  notify,
+  refresh,
+  showAuth,
+  requestPrivacyUnlock,
+  updatePrivacyIndicator,
+  notePrivacyActivity,
+  renderGrid,
+  renderLoadMore,
 }
 
 /**
@@ -258,7 +285,7 @@ function uniqueFiles(fileList) {
  *
  * 改动前端功能时记得同步这里和 package.json。
  */
-const APP_VERSION = '1.8.5'
+const APP_VERSION = '1.9.1'
 
 /**
  * 调用后端 JSON API，并把非 2xx 响应转换为异常。
@@ -363,8 +390,10 @@ function notify(message, kind = 'error') {
  * 同时清掉内存里的用户数据，并关掉可能开着的弹窗。
  */
 function showAuth() {
+  if (window.VaultTransfers) window.VaultTransfers.pauseForAuth()
   resetPrivacyState()
   state.user = null
+  state.transferMode = false
   state.files = []
   clearPreviewPreloads()
   // 分页状态也要重置，否则换账号登录后会接着上一个人的「已加载数量」往下取
@@ -412,6 +441,7 @@ function resetPrivacyState() {
   privacyHeartbeatAt = 0
   closePrivacyAuthDialog(false)
   updatePrivacyIndicator()
+  window.VaultTransfers?.render()
 }
 
 function focusPrivacyAuthField() {
@@ -527,6 +557,7 @@ async function submitPrivacyAuth(form) {
     state.privacyUnlocked = true
     privacyHeartbeatAt = Date.now()
     updatePrivacyIndicator()
+    window.VaultTransfers?.render()
     notePrivacyActivity()
     closePrivacyAuthDialog(true)
     if (mode === 'reset') notify('隐私密码已重置，旧解锁会话已失效', 'ok')
@@ -583,12 +614,14 @@ async function lockPrivacySpace({ switchToAll = false, silent = true, skipHeartb
     try { await privacyHeartbeatPromise } catch { /* 下面统一清除 Cookie */ }
   }
   const wasPrivate = state.privacyMode || state.privacyUnlocked
+  if (wasPrivate) window.VaultTransfers?.pausePrivate()
   state.privacyMode = false
   state.privacyUnlocked = false
   privacyHeartbeatAt = 0
   closePrivacyAuthDialog(false)
   closeLightbox()
   updatePrivacyIndicator()
+  window.VaultTransfers?.render()
   if (state.user) {
     try { await api('/api/privacy/lock', { method: 'POST' }) } catch { /* 本地状态仍然立即锁定 */ }
   }
@@ -619,6 +652,7 @@ async function recoverPrivacyAccess() {
 }
 
 async function enterPrivacySpace() {
+  if (state.transferMode && window.VaultTransfers) window.VaultTransfers.leave()
   if (state.privacyMode && state.privacyUnlocked) {
     await lockPrivacySpace({ switchToAll: true })
     return
@@ -919,7 +953,7 @@ function cardHtml(record) {
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 7h14M9.5 7V5.5A1.5 1.5 0 0 1 11 4h2a1.5 1.5 0 0 1 1.5 1.5V7"/><path d="M6.5 7l.8 11a1.6 1.6 0 0 0 1.6 1.5h6.2a1.6 1.6 0 0 0 1.6-1.5l.8-11"/></svg>
         </button>`
     : inPrivacy
-      ? `<a href="${apiUrl(`/api/files/${record.id}/download`)}" title="下载" aria-label="下载" data-no-open>
+      ? `<a href="${apiUrl(`/api/files/${record.id}/download`)}" title="下载" aria-label="下载" data-download="${record.id}" data-no-open>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11m0 0-4-4m4 4 4-4"/><path d="M5 19h14"/></svg>
         </a>
         <button type="button" title="移出隐私空间" aria-label="移出隐私空间" data-unprivate data-no-open>
@@ -928,7 +962,7 @@ function cardHtml(record) {
         <button type="button" title="彻底删除" aria-label="彻底删除" data-private-delete data-no-open>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 7h14M9.5 7V5.5A1.5 1.5 0 0 1 11 4h2a1.5 1.5 0 0 1 1.5 1.5V7"/><path d="M6.5 7l.8 11a1.6 1.6 0 0 0 1.6 1.5h6.2a1.6 1.6 0 0 0 1.6-1.5l.8-11"/></svg>
         </button>`
-      : `<a href="${apiUrl(`/api/files/${record.id}/download`)}" title="下载" aria-label="下载" data-no-open>
+      : `<a href="${apiUrl(`/api/files/${record.id}/download`)}" title="下载" aria-label="下载" data-download="${record.id}" data-no-open>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11m0 0-4-4m4 4 4-4"/><path d="M5 19h14"/></svg>
         </a>
         <button type="button" title="移入隐私空间" aria-label="移入隐私空间" data-private data-no-open>
@@ -956,6 +990,15 @@ function renderGrid() {
   const empty = $('#empty-state')
   const count = $('#view-count')
   const title = $('#view-title')
+
+  // 传输页不是文件列表；让独立模块负责标题、计数和面板，避免列表刷新把它覆盖。
+  if (state.transferMode && window.VaultTransfers) {
+    window.VaultTransfers.render()
+    return
+  }
+
+  // 传输页可能把网格隐藏过；回到文件列表时必须恢复，否则数据已加载却不可见。
+  grid.hidden = false
 
   // 回收站是独立视图，标题和分类无关
   title.textContent = state.privacyMode ? '隐私空间' : (state.trash ? '回收站' : CATEGORY_LABEL[state.category])
@@ -1058,6 +1101,10 @@ function buildListParams(offset) {
 /** 更新底部「加载更多」区域的显示。 */
 function renderLoadMore() {
   const wrap = $('#load-more-wrap')
+  if (state.transferMode) {
+    wrap.hidden = true
+    return
+  }
   const btn = $('#load-more-btn')
   const hint = $('#load-more-hint')
 
@@ -1115,7 +1162,7 @@ async function refresh({ silent = false } = {}) {
   const skeleton = $('#skeleton')
 
   // 首次加载（列表还是空的）时显示骨架屏占位，让用户知道正在加载
-  if (!silent && !state.files.length) {
+  if (!silent && !state.transferMode && !state.files.length) {
     skeleton.hidden = false
     $('#file-grid').innerHTML = ''
     $('#empty-state').hidden = true
@@ -1197,132 +1244,19 @@ async function loadMore() {
   }
 }
 
-/* ───────────────────────────── 上传 ───────────────────────────── */
-
 /**
- * 上传单个文件。
+ * 上传入口统一交给 transfers.js 的分块续传队列。
  *
- * 【为什么不用 fetch，改用老式的 XMLHttpRequest】
- *   上传大文件要给用户看进度条。fetch 直到传完才告诉你结果，
- *   中间没有「传了多少」的回调；XMLHttpRequest 有 upload.onprogress 事件，
- *   所以这里必须用老 API。
- *
- * 【请求体直接就是文件本身】
- *   注意 xhr.send(file)：把 File 对象直接当请求体发出去，没有任何表单包装。
- *   文件名和 privacy 标记通过 URL 查询参数传递，分类始终由服务端判断；
- *   后端因此可以「拿到多少写多少」，不用先解析 multipart 格式。
- *
- * 用 Promise 包住回调式 XHR，方便 uploadFiles() 并发等待上传结果。
- *
- * @param {File} file 浏览器 File 对象
- * @returns {Promise<boolean>} 成功为 true；业务失败或网络失败为 false
+ * 保留这个函数名是为了不改变输入框、拖拽和测试代码的调用方式；真正的分块、
+ * 重试、暂停和会话恢复都由独立模块处理。
  */
-function uploadOne(file) {
-  return new Promise((resolve) => {
-    // 文件名要经过 URLSearchParams 编码，否则中文名会让服务器返回 400。
-    // 分类由服务端按 MIME / 扩展名判断，避免受当前浏览分类影响。
-    const params = new URLSearchParams({ name: file.name })
-    // 在隐私空间里发起的上传直接落为隐私文件，避免上传后又出现在“全部”中。
-    if (state.privacyMode) params.set('private', '1')
-
-    // 先弹一个 0% 的进度条，后面随上传实时更新
-    const toast = createToast({ title: file.name, sub: `0% · ${formatSize(file.size)}` })
-
-    const xhr = new XMLHttpRequest()
-    xhr.open('POST', apiUrl(`/api/files/upload?${params.toString()}`))
-
-    // 让这次请求带上 Cookie（相当于 fetch 的 credentials: 'include'）
-    xhr.withCredentials = true
-
-    // 告诉服务器这是什么类型的文件，后端据此判断它属于照片/视频/普通文件
-    xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream')
-
-    /**
-     * 上传进度事件。
-     * lengthComputable 表示「总大小已知」——只有知道总量才能算出百分比。
-     * event.loaded 是已发送字节数，event.total 是总字节数。
-     */
-    xhr.upload.addEventListener('progress', (event) => {
-      // 大文件上传本身也是有效操作，不能让十分钟空闲计时在上传中被误触发。
-      notePrivacyActivity()
-      if (!event.lengthComputable) return
-      const ratio = event.loaded / event.total
-      toast.progress(ratio)
-      toast.setSub(`${Math.round(ratio * 100)}% · ${formatSize(file.size)}`)
-    })
-
-    // 请求成功返回（注意：这里指「网络层面成功」，状态码可能是 4xx/5xx）
-    xhr.addEventListener('load', () => {
-      if (xhr.status >= 200 && xhr.status < 300) {
-        // 成功提示里带上服务端最终判定的分类，避免用户误以为分类取决于当前页面
-        let categoryText = ''
-        try {
-          const body = JSON.parse(xhr.responseText)
-          if (body && body.file && CATEGORY_LABEL[body.file.category]) {
-            categoryText = `${CATEGORY_LABEL[body.file.category]} · `
-          }
-        } catch {
-          /* 响应异常不影响上传成功状态 */
-        }
-        toast.succeed(`已上传 · ${categoryText}${formatSize(file.size)}`)
-        resolve(true)
-        return
-      }
-      // 状态码不在 2xx 范围内，说明后端拒绝了，尝试读出它给的原因
-      let message = `上传失败（${xhr.status}）`
-      let errorCode = ''
-      try {
-        const body = JSON.parse(xhr.responseText)
-        if (body && body.error) message = body.error
-        if (body && body.code) errorCode = body.code
-      } catch {
-        /* 响应不是 JSON，就用上面的通用提示 */
-      }
-      toast.fail(message)
-      if (errorCode === 'PRIVACY_LOCKED') {
-        // 这是隐私会话过期，不是登录过期，不能把用户踢回登录页。
-        void lockPrivacySpace({ switchToAll: state.privacyMode })
-      } else if (xhr.status === 401) {
-        showAuth()
-      }
-      resolve(false)
-    })
-
-    // 网络层面就失败了（断网、服务器没起来）
-    xhr.addEventListener('error', () => {
-      toast.fail('网络异常，上传中断')
-      resolve(false)
-    })
-    xhr.addEventListener('abort', () => {
-      toast.fail('上传已取消')
-      resolve(false)
-    })
-
-    xhr.send(file)   // 真正开始发送
-  })
-}
-
-// 正在上传的文件：即使同一个文件被连续拖入两次，也不会并发上传两份。
-const activeUploadKeys = new Set()
-
 async function uploadFiles(fileList) {
-  const files = uniqueFiles(fileList)
-  if (!files.length) return
-
-  const accepted = files.filter((file) => !activeUploadKeys.has(fileSignature(file)))
-  if (!accepted.length) return
-
-  const keys = accepted.map(fileSignature)
-  keys.forEach((key) => activeUploadKeys.add(key))
-
-  try {
-    const results = await Promise.all(accepted.map((file) => uploadOne(file)))
-    if (results.some(Boolean)) await refresh({ silent: true })
-  } finally {
-    keys.forEach((key) => activeUploadKeys.delete(key))
+  if (!window.VaultTransfers) {
+    notify('传输模块尚未加载，请刷新页面后重试')
+    return
   }
+  await window.VaultTransfers.uploadFiles(fileList)
 }
-
 /* ───────────────────────────── 图片缩放 ───────────────────────────── */
 
 /**
@@ -2278,6 +2212,7 @@ function bindApp() {
   $('#cat-list').addEventListener('click', async (event) => {
     const btn = event.target.closest('[data-cat]')
     if (!btn) return
+    if (state.transferMode && window.VaultTransfers) window.VaultTransfers.leave()
     // 离开隐私空间即重新上锁，之后再次访问必须重新输入隐私密码。
     if (state.privacyMode) await lockPrivacySpace()
     state.category = btn.dataset.cat
@@ -2290,6 +2225,7 @@ function bindApp() {
 
   // 回收站入口：独立视图，进去时清空搜索词，避免带着别的条件看
   $('#trash-btn').addEventListener('click', async () => {
+    if (state.transferMode && window.VaultTransfers) window.VaultTransfers.leave()
     if (state.privacyMode) await lockPrivacySpace()
     await openTrashView()
   })
@@ -2433,6 +2369,13 @@ function bindApp() {
   grid.addEventListener('click', (event) => {
     const card = event.target.closest('.card')
     if (!card) return
+    const downloadLink = event.target.closest('[data-download]')
+    if (downloadLink) {
+      event.preventDefault()
+      const record = state.files.find((row) => row.id === card.dataset.id)
+      if (record && window.VaultTransfers) void window.VaultTransfers.startDownload(record)
+      return
+    }
     if (event.target.closest('[data-private]')) {
       moveToPrivacy(card.dataset.id)
       return
@@ -2470,6 +2413,12 @@ function bindApp() {
 
   // 灯箱
   $('#lightbox').addEventListener('click', (event) => {
+    if (event.target.closest('#lightbox-download')) {
+      event.preventDefault()
+      const record = state.files.find((row) => row.id === state.lightboxId)
+      if (record && window.VaultTransfers) void window.VaultTransfers.startDownload(record)
+      return
+    }
     if (event.target.closest('[data-close]')) closeLightbox()
   })
   $('#lightbox-prev').addEventListener('click', () => navigateLightbox(-1))
@@ -2643,6 +2592,7 @@ async function boot() {
       .catch(() => {})
       .finally(() => { privacyReloadLockPromise = null })
     showApp()
+    await window.VaultTransfers?.restore()
     await refresh()   // 登录状态确认后，才去加载文件列表
     await privacyReloadLockPromise
   } catch {
