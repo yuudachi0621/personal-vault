@@ -139,6 +139,7 @@ let privacyAuthResolver = null
 let privacyAuthMode = 'unlock'
 let privacyHeartbeatAt = 0
 let privacyHeartbeatPromise = null
+let privacyReloadLockPromise = null
 try {
   const savedQuality = localStorage.getItem(VIDEO_QUALITY_KEY)
   if (['720p', 'original'].includes(savedQuality)) state.videoQuality = savedQuality
@@ -257,7 +258,7 @@ function uniqueFiles(fileList) {
  *
  * 改动前端功能时记得同步这里和 package.json。
  */
-const APP_VERSION = '1.8.0'
+const APP_VERSION = '1.8.5'
 
 /**
  * 调用后端 JSON API，并把非 2xx 响应转换为异常。
@@ -314,7 +315,9 @@ function createToast({ title, sub = '', kind = '' }) {
     <div class="toast-head"><span class="dot"></span><span class="toast-name"></span></div>
     ${sub ? '<div class="toast-sub"></div>' : ''}
     <div class="toast-track"><i></i></div>`
-  $('.toast-name', el).textContent = title
+  const nameEl = $('.toast-name', el)
+  nameEl.textContent = title
+  nameEl.title = title
   const subEl = $('.toast-sub', el)
   if (subEl) subEl.textContent = sub
   $('#toasts').appendChild(el)
@@ -480,6 +483,9 @@ function openPrivacyAuthDialog() {
 }
 
 async function requestPrivacyUnlock() {
+  // 刷新后的锁定请求可能与主界面并行；任何隐私操作都要先等它落地，
+  // 避免旧隐私 Cookie 与新解锁 Cookie 发生覆盖竞态。
+  if (privacyReloadLockPromise) await privacyReloadLockPromise
   if (state.privacyUnlocked) return true
   return openPrivacyAuthDialog()
 }
@@ -842,6 +848,42 @@ function trashRemainText(record) {
   return `${Math.max(1, Math.floor(left / 60000))} 分钟后清除`
 }
 
+/**
+ * 照片和视频封面优先使用服务端缓存的 JPEG 缩略图。
+ * 照片生成失败时回退原图；视频失败时回退到原视频取帧。
+ */
+function setupMediaThumbnails(root = document) {
+  $$('img[data-media-thumb]', root).forEach((img) => {
+    const videoFallback = img.nextElementSibling
+    const canFallbackToVideo = videoFallback && videoFallback.matches('video[data-video-fallback]')
+    let usedOriginalImage = false
+
+    const handleError = () => {
+      if (!img.isConnected) return
+      const originalSrc = img.dataset.fallbackSrc || ''
+
+      if (originalSrc && !usedOriginalImage) {
+        usedOriginalImage = true
+        img.src = originalSrc
+        return
+      }
+
+      if (canFallbackToVideo) {
+        img.remove()
+        videoFallback.hidden = false
+        videoFallback.src = videoFallback.dataset.src || ''
+        videoFallback.load()
+        return
+      }
+
+      img.remove()
+    }
+
+    img.addEventListener('error', handleError)
+    if (img.complete && img.naturalWidth === 0) handleError()
+  })
+}
+
 function cardHtml(record) {
   const raw = apiUrl(`/api/files/${record.id}/raw`)
   const inTrash = Boolean(record.deletedAt)
@@ -849,9 +891,12 @@ function cardHtml(record) {
 
   let thumb
   if (record.category === 'image') {
-    thumb = `<img src="${raw}" alt="${escapeHtml(record.name)}" loading="lazy" decoding="async" draggable="false">`
+    const thumbnail = apiUrl(`/api/files/${record.id}/thumbnail`)
+    thumb = `<img class="media-thumb" src="${thumbnail}" alt="" loading="lazy" decoding="async" draggable="false" data-media-thumb data-fallback-src="${raw}">`
   } else if (record.category === 'video') {
-    thumb = `<video src="${raw}#t=0.5" preload="metadata" muted playsinline draggable="false"></video>
+    const thumbnail = apiUrl(`/api/files/${record.id}/thumbnail`)
+    thumb = `<img class="media-thumb" src="${thumbnail}" alt="" loading="lazy" decoding="async" draggable="false" data-media-thumb>
+      <video data-video-fallback data-src="${raw}#t=0.5" preload="none" muted playsinline draggable="false" hidden></video>
       <div class="card-play"><span><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.2v13.6L19 12z"/></svg></span></div>`
   } else if (record.category === 'music') {
     thumb = musicGlyph(record)
@@ -943,6 +988,7 @@ function renderGrid() {
 
   empty.hidden = true
   grid.innerHTML = state.files.map(cardHtml).join('')
+  setupMediaThumbnails(grid)
   $$('.card', grid).forEach((card, index) => {
     card.style.animationDelay = `${Math.min(index * 22, 260)}ms`
   })
@@ -1132,7 +1178,9 @@ async function loadMore() {
     state.hasMore = data.page.hasMore
 
     // insertAdjacentHTML 把新卡片的 HTML 直接塞到网格末尾，不破坏已有的 DOM
-    $('#file-grid').insertAdjacentHTML('beforeend', data.files.map(cardHtml).join(''))
+    const grid = $('#file-grid')
+    grid.insertAdjacentHTML('beforeend', data.files.map(cardHtml).join(''))
+    setupMediaThumbnails(grid)
   } catch (error) {
     if (error.code === 'PRIVACY_LOCKED') {
       await recoverPrivacyAccess()
@@ -2589,10 +2637,14 @@ async function boot() {
      */
     const { user } = await api('/api/auth/me')
     state.user = user
-    // 刷新 / 重新打开页面后必须重新输入隐私密码。服务端 Cookie 不能跨页面加载续用。
-    await api('/api/privacy/lock', { method: 'POST' }).catch(() => {})
+    // 刷新 / 重新打开页面后必须重新输入隐私密码。锁定与主界面、普通文件列表
+    // 可以并行执行；真正进入隐私空间时 requestPrivacyUnlock() 会等待锁定完成。
+    privacyReloadLockPromise = api('/api/privacy/lock', { method: 'POST' })
+      .catch(() => {})
+      .finally(() => { privacyReloadLockPromise = null })
     showApp()
     await refresh()   // 登录状态确认后，才去加载文件列表
+    await privacyReloadLockPromise
   } catch {
     // 走到这里说明没登录（或令牌过期、服务器出错），一律退回登录页
     showAuth()
