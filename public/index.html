@@ -32,8 +32,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#faf9f5">
   <title>个人云存储 · 视频 / 照片 / 文件</title>
-  <link rel="icon" href="/favicon.svg?v=1.9.7">
-  <link rel="stylesheet" href="/styles.css?v=1.9.7">
+  <link rel="icon" href="/favicon.svg?v=1.9.8">
+  <link rel="stylesheet" href="/styles.css?v=1.9.8">
 </head>
 
 <body>
@@ -348,11 +348,13 @@
           <p id="empty-desc">把视频、照片或文件拖进来，或点击右上角「上传」按钮。</p>
         </div>
 
-        <!-- 分页：一次只取 60 条，需要时再加载下一页 -->
-        <div id="load-more-wrap" class="load-more" hidden>
-          <button class="btn btn-ghost" type="button" id="load-more-btn">加载更多</button>
-          <span class="load-more-hint" id="load-more-hint"></span>
-        </div>
+        <!-- 分页：每页 30 条，减少一次性 DOM 和缩略图请求 -->
+        <nav id="pagination" class="pagination" aria-label="文件分页" hidden>
+          <button class="btn btn-ghost btn-sm" type="button" id="page-prev">上一页</button>
+          <div class="page-numbers" id="page-numbers"></div>
+          <button class="btn btn-ghost btn-sm" type="button" id="page-next">下一页</button>
+          <span class="pagination-hint" id="page-hint"></span>
+        </nav>
       </main>
     </div>
 
@@ -500,9 +502,9 @@
 
   <div id="toasts" class="toasts" aria-live="polite"></div>
 
-  <script src="/config.js?v=1.9.7"></script>
-  <script src="/app.js?v=1.9.7"></script>
-  <script src="/transfers.js?v=1.9.7"></script>
+  <script src="/config.js?v=1.9.8"></script>
+  <script src="/app.js?v=1.9.8"></script>
+  <script src="/transfers.js?v=1.9.8"></script>
 </body>
 
 </html>

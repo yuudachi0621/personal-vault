@@ -110,8 +110,10 @@ const state = {
   lightboxId: null,  // 灯箱里正在看哪个文件
   lightboxNavigating: false, // 是否正在为灯箱加载下一页
   total: 0,          // 当前筛选条件下共有多少条（由服务器告知）
+  page: 1,           // 当前页码，从 1 开始
+  pageCount: 1,      // 当前筛选条件下的总页数
   hasMore: false,    // 是否还有下一页
-  loadingMore: false, // 是否正在加载下一页
+  loadingMore: false, // 是否正在加载或切换页面
   requireRegistrationCode: false, // 服务端是否要求注册码（决定要不要显示那个输入框）
   trash: false,      // 是否处于回收站视图
   ttlMs: 24 * 60 * 60 * 1000, // 回收站保留时长（由服务器下发，前端只用来算倒计时）
@@ -144,7 +146,7 @@ window.VaultTransferHost = {
   updatePrivacyIndicator,
   notePrivacyActivity,
   renderGrid,
-  renderLoadMore,
+  renderPagination,
 }
 
 /**
@@ -155,9 +157,9 @@ window.VaultTransferHost = {
  *   一次响应几百 KB，浏览器还要一次性建出几千个卡片节点，
  *   页面会明显卡顿。更糟的是每个卡片都会去请求缩略图，
  *   服务器瞬间被打出上百个并发连接，小内存机器直接扛不住。
- *   现在一次只拿 60 条，滚动到底再点「加载更多」。
+ *   现在一次只拿 30 条，通过底部分页控件切换页面。
  */
-const PAGE_SIZE = 60
+const PAGE_SIZE = 30
 const VIDEO_QUALITY_KEY = 'personal-vault:video-quality'
 const PRIVACY_IDLE_MS = 10 * 60 * 1000
 const PRIVACY_HEARTBEAT_MS = 4 * 60 * 1000
@@ -285,7 +287,7 @@ function uniqueFiles(fileList) {
  *
  * 改动前端功能时记得同步这里和 package.json。
  */
-const APP_VERSION = '1.9.7'
+const APP_VERSION = '1.9.8'
 
 /**
  * 调用后端 JSON API，并把非 2xx 响应转换为异常。
@@ -398,12 +400,14 @@ function showAuth() {
   clearPreviewPreloads()
   // 分页状态也要重置，否则换账号登录后会接着上一个人的「已加载数量」往下取
   state.total = 0
+  state.page = 1
+  state.pageCount = 1
   state.hasMore = false
   state.loadingMore = false
   state.trash = false
   $('#app-view').hidden = true
   $('#auth-view').hidden = false
-  $('#load-more-wrap').hidden = true
+  $('#pagination').hidden = true
   closeLightbox()
   $('#password-modal').hidden = true
 }
@@ -628,6 +632,7 @@ async function lockPrivacySpace({ switchToAll = false, silent = true, skipHeartb
   if (switchToAll) {
     state.category = 'all'
     state.query = ''
+    state.page = 1
     $('#search-input').value = ''
     $('#privacy-btn').classList.remove('is-active')
     $('#trash-btn').classList.remove('is-active')
@@ -663,6 +668,7 @@ async function enterPrivacySpace() {
   state.privacyUnlocked = true
   state.category = 'all'
   state.query = ''
+  state.page = 1
   $('#search-input').value = ''
   $$('#cat-list .cat-item').forEach((item) => item.classList.remove('is-active'))
   $('#trash-btn').classList.remove('is-active')
@@ -1098,26 +1104,46 @@ function buildListParams(offset) {
   return params
 }
 
-/** 更新底部「加载更多」区域的显示。 */
-function renderLoadMore() {
-  const wrap = $('#load-more-wrap')
+/** 生成连续页码并在中间过长时插入省略号。 */
+function paginationItems(current, total) {
+  if (total <= 7) return Array.from({ length: total }, (_, index) => index + 1)
+  const pages = new Set([1, total, current - 1, current, current + 1])
+  if (current <= 3) { pages.add(2); pages.add(3); pages.add(4) }
+  if (current >= total - 2) { pages.add(total - 1); pages.add(total - 2); pages.add(total - 3) }
+  const sorted = [...pages].filter((page) => page >= 1 && page <= total).sort((a, b) => a - b)
+  const result = []
+  for (const page of sorted) {
+    if (result.length && page - result[result.length - 1] > 1) result.push('ellipsis')
+    result.push(page)
+  }
+  return result
+}
+
+/** 更新底部分页。 */
+function renderPagination() {
+  const nav = $('#pagination')
+  if (!nav) return
   if (state.transferMode) {
-    wrap.hidden = true
-    return
-  }
-  const btn = $('#load-more-btn')
-  const hint = $('#load-more-hint')
-
-  // 已经全部加载完了就不显示这个区域，界面更干净
-  if (!state.hasMore) {
-    wrap.hidden = true
+    nav.hidden = true
     return
   }
 
-  wrap.hidden = false
-  btn.disabled = state.loadingMore
-  btn.textContent = state.loadingMore ? '加载中…' : '加载更多'
-  hint.textContent = `已显示 ${state.files.length} / ${state.total}`
+  state.pageCount = Math.max(1, Math.ceil(state.total / PAGE_SIZE))
+  state.page = Math.min(state.pageCount, Math.max(1, state.page))
+  if (state.total <= PAGE_SIZE) {
+    nav.hidden = true
+    return
+  }
+
+  nav.hidden = false
+  $('#page-prev').disabled = state.loadingMore || state.page <= 1
+  $('#page-next').disabled = state.loadingMore || state.page >= state.pageCount
+  $('#page-hint').textContent = `第 ${state.page} / ${state.pageCount} 页 · 共 ${state.total} 项`
+  $('#page-numbers').innerHTML = paginationItems(state.page, state.pageCount).map((item) => {
+    if (item === 'ellipsis') return '<span class="pagination-ellipsis" aria-hidden="true">…</span>'
+    const active = item === state.page
+    return `<button type="button" class="page-number${active ? ' is-active' : ''}" data-page="${item}" ${active ? 'aria-current="page"' : ''} ${state.loadingMore ? 'disabled' : ''}>${item}</button>`
+  }).join('')
 }
 
 /**
@@ -1170,17 +1196,26 @@ async function refresh({ silent = false } = {}) {
 
   try {
     // 筛选和排序都由后端做（数据在服务器那边），前端只负责把条件传过去
-    const data = await fetchPage(0)
+    let data = await fetchPage((state.page - 1) * PAGE_SIZE)
+    let pageCount = Math.max(1, Math.ceil(data.page.total / PAGE_SIZE))
+
+    // 删除当前页最后几条后，自动回退到仍然有效的最后一页。
+    if (!data.files.length && state.page > pageCount) {
+      state.page = pageCount
+      data = await fetchPage((state.page - 1) * PAGE_SIZE)
+      pageCount = Math.max(1, Math.ceil(data.page.total / PAGE_SIZE))
+    }
 
     // 存进状态，再据此重新渲染
     state.files = data.files
     state.usage = data.usage
     state.total = data.page.total
-    state.hasMore = data.page.hasMore
+    state.pageCount = pageCount
+    state.hasMore = state.page < state.pageCount
 
     renderGrid()    // 画文件网格
     renderUsage()   // 画侧栏的用量统计
-    renderLoadMore() // 更新「加载更多」按钮
+    renderPagination()
   } catch (error) {
     /**
      * PRIVACY_LOCKED 只表示隐私解锁过期，应弹出隐私密码框而不是退出登录；
@@ -1202,32 +1237,38 @@ async function refresh({ silent = false } = {}) {
 }
 
 /**
- * 加载下一页，追加到现有列表后面。
+ * 切换到指定页并替换当前列表。
  *
- * 注意这里用「追加」而不是「重画全部」：
- *   重画会让已经加载好的图片全部重新请求，滚动位置也会跳。
- *   追加只处理新增的那 60 条，体验流畅得多。
+ * @param {number} page 目标页码，从 1 开始
+ * @param {{scroll?: boolean}} options scroll=false 供灯箱跨页导航使用
+ * @returns {Promise<void>}
  */
-async function loadMore() {
-  // 正在加载、或者已经没有更多了，就直接忽略（防止连点重复请求）
-  if (state.loadingMore || !state.hasMore) return
+async function goToPage(page, { scroll = true } = {}) {
+  const target = Math.max(1, Math.min(state.pageCount || 1, Math.floor(Number(page) || 1)))
+  if (state.loadingMore || (target === state.page && state.files.length)) return
 
   state.loadingMore = true
-  renderLoadMore()
+  renderPagination()
 
   try {
-    // offset = 已加载数量，正好接在上一页后面
-    const data = await fetchPage(state.files.length)
-
-    state.files = state.files.concat(data.files)
+    let actualPage = target
+    let data = await fetchPage((actualPage - 1) * PAGE_SIZE)
+    let pageCount = Math.max(1, Math.ceil(data.page.total / PAGE_SIZE))
+    if (!data.files.length && actualPage > pageCount) {
+      actualPage = pageCount
+      data = await fetchPage((actualPage - 1) * PAGE_SIZE)
+      pageCount = Math.max(1, Math.ceil(data.page.total / PAGE_SIZE))
+    }
+    state.files = data.files
     state.usage = data.usage
     state.total = data.page.total
-    state.hasMore = data.page.hasMore
+    state.pageCount = pageCount
+    state.page = actualPage
+    state.hasMore = state.page < state.pageCount
 
-    // insertAdjacentHTML 把新卡片的 HTML 直接塞到网格末尾，不破坏已有的 DOM
-    const grid = $('#file-grid')
-    grid.insertAdjacentHTML('beforeend', data.files.map(cardHtml).join(''))
-    setupMediaThumbnails(grid)
+    renderGrid()
+    renderUsage()
+    if (scroll) window.scrollTo({ top: 0, behavior: 'smooth' })
   } catch (error) {
     if (error.code === 'PRIVACY_LOCKED') {
       await recoverPrivacyAccess()
@@ -1240,10 +1281,9 @@ async function loadMore() {
     notify(error.message)
   } finally {
     state.loadingMore = false
-    renderLoadMore()
+    renderPagination()
   }
 }
-
 /**
  * 上传入口统一交给 transfers.js 的分块续传队列。
  *
@@ -1643,8 +1683,8 @@ function updateLightboxNavigation() {
 
   prev.hidden = !hasMultiple
   next.hidden = !hasMultiple
-  prev.disabled = index <= 0 || state.lightboxNavigating
-  next.disabled = state.lightboxNavigating || index < 0 || (index >= state.files.length - 1 && !state.hasMore)
+  prev.disabled = state.lightboxNavigating || index < 0 || (index <= 0 && state.page <= 1)
+  next.disabled = state.lightboxNavigating || index < 0 || (index >= state.files.length - 1 && state.page >= state.pageCount)
 }
 
 /** 切换预览时先暂停上一份音视频，避免后台继续播放。 */
@@ -1934,22 +1974,28 @@ function setupVideoPlayer(record, container) {
   })
 }
 
-/** 按当前筛选和排序顺序切换上一个 / 下一个文件。 */
+/** 按当前筛选和排序顺序切换上一个 / 下一个文件，并支持跨页。 */
 async function navigateLightbox(direction) {
   if (!state.lightboxId || state.lightboxNavigating) return
   let index = lightboxRecordIndex()
   if (index < 0) return
 
-  if (direction > 0 && index >= state.files.length - 1 && state.hasMore) {
+  if (direction > 0 && index >= state.files.length - 1 && state.page < state.pageCount) {
     const expectedId = state.lightboxId
     state.lightboxNavigating = true
     updateLightboxNavigation()
-    try {
-      await loadMore()
-    } finally {
-      state.lightboxNavigating = false
-    }
-    if (state.lightboxId !== expectedId) return
+    try { await goToPage(state.page + 1, { scroll: false }) } finally { state.lightboxNavigating = false }
+    if (state.lightboxId === expectedId && state.files.length) openLightbox(state.files[0].id)
+    return
+  }
+
+  if (direction < 0 && index <= 0 && state.page > 1) {
+    const expectedId = state.lightboxId
+    state.lightboxNavigating = true
+    updateLightboxNavigation()
+    try { await goToPage(state.page - 1, { scroll: false }) } finally { state.lightboxNavigating = false }
+    if (state.lightboxId === expectedId && state.files.length) openLightbox(state.files[state.files.length - 1].id)
+    return
   }
 
   index = lightboxRecordIndex()
@@ -1960,7 +2006,6 @@ async function navigateLightbox(direction) {
   }
   openLightbox(state.files[targetIndex].id)
 }
-
 /**
  * 打开当前已加载列表中的文件预览。
  * 会根据分类创建图片、视频、音频或文件占位视图，并启动相邻文件预加载。
@@ -1978,7 +2023,8 @@ function openLightbox(id) {
   const inTrash = Boolean(record.deletedAt)
   const inPrivate = Boolean(record.isPrivate)
   const index = lightboxRecordIndex(id)
-  const position = state.total > 1 && index >= 0 ? ` · ${index + 1} / ${state.total}` : ''
+  const absoluteIndex = (state.page - 1) * PAGE_SIZE + index
+  const position = state.total > 1 && index >= 0 ? ` · ${absoluteIndex + 1} / ${state.total}` : ''
   const summary = `${inPrivate ? '隐私 · ' : ''}${CATEGORY_LABEL[record.category]} · ${formatSize(record.size)} · ${inTrash ? trashRemainText(record) : formatDate(record.createdAt)}`
 
   $('#lightbox-name').textContent = record.name
@@ -2077,6 +2123,7 @@ function enterTrashView() {
   state.trash = true
   state.category = 'all'
   state.query = ''
+  state.page = 1
   $('#search-input').value = ''
   $$('#cat-list .cat-item').forEach((item) => item.classList.remove('is-active'))
   $('#trash-btn').classList.add('is-active')
@@ -2216,6 +2263,7 @@ function bindApp() {
     // 离开隐私空间即重新上锁，之后再次访问必须重新输入隐私密码。
     if (state.privacyMode) await lockPrivacySpace()
     state.category = btn.dataset.cat
+    state.page = 1
     state.trash = false                       // 从回收站切回普通列表
     $('#trash-btn').classList.remove('is-active')
     $('#privacy-btn').classList.remove('is-active')
@@ -2267,6 +2315,7 @@ function bindApp() {
   // 排序
   $('#sort-select').addEventListener('change', (event) => {
     state.sort = event.target.value
+    state.page = 1
     refresh()
   })
 
@@ -2277,6 +2326,7 @@ function bindApp() {
     clearTimeout(searchTimer)
     searchTimer = setTimeout(() => {
       state.query = value
+      state.page = 1
       refresh()
     }, 220)
   })
@@ -2292,8 +2342,13 @@ function bindApp() {
     input.value = ''
   })
 
-  // 加载更多
-  $('#load-more-btn').addEventListener('click', loadMore)
+  // 分页
+  $('#page-prev').addEventListener('click', () => { void goToPage(state.page - 1) })
+  $('#page-next').addEventListener('click', () => { void goToPage(state.page + 1) })
+  $('#page-numbers').addEventListener('click', (event) => {
+    const button = event.target.closest('[data-page]')
+    if (button) void goToPage(Number(button.dataset.page))
+  })
 
   // 拖拽上传
   let dragDepth = 0

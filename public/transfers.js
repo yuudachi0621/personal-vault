@@ -3,7 +3,7 @@
    ══════════════════════════════════════════════════════════════════════════
 
    本文件负责三件事：
-   1. 把上传改成 8 MiB 分块会话，支持暂停、继续、取消和刷新后恢复；
+   1. 把上传改成 16 MiB 分块会话，支持暂停、继续、取消和刷新后恢复；
    2. 在支持 File System Access API 的浏览器中，用 Range 分块写入用户选择的
       本地文件，实现可暂停的下载；不支持的浏览器回退到普通下载；
    3. 维护传输页面的任务列表、进度、速度和操作按钮。
@@ -12,7 +12,7 @@
    因此上传任务刷新后需要重新选择原文件，下载任务刷新后需要重新授权写入位置。
    ══════════════════════════════════════════════════════════════════════════ */
 
-const UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024
+const UPLOAD_CHUNK_BYTES = 16 * 1024 * 1024
 const DOWNLOAD_CHUNK_BYTES = 8 * 1024 * 1024
 const MAX_PARALLEL_UPLOADS = 2
 const UPLOAD_STORE_PREFIX = 'personal-vault:uploads:'
@@ -33,6 +33,7 @@ const uploadRuns = new Map()
 const downloadRuns = new Map()
 let transferDbPromise = null
 let uploadPumpTimer = 0
+let uploadRefreshTimer = 0
 let uploadQueueBlockedUntil = 0
 let uploadQueueBusyDelay = 0
 let uploadQueueProbeOnly = false
@@ -197,7 +198,7 @@ function syncTransferViewVisibility() {
   $('#skeleton').hidden = true
   $('#empty-state').hidden = true
   $('#trash-banner').hidden = true
-  $('#load-more-wrap').hidden = true
+  $('#pagination').hidden = true
   $('#view-title').textContent = '传输'
   const activeCount = [...transfers.uploads, ...transfers.downloads]
     .filter((task) => transferIsVisible(task) && transferIsActive(task)).length
@@ -269,7 +270,7 @@ function openTransferView() {
 }
 
 function leaveTransferView() {
-  const { $, $$, state, renderGrid, renderLoadMore } = host()
+  const { $, $$, state, renderGrid, renderPagination } = host()
   state.transferMode = false
   $('#transfer-btn').classList.remove('is-active')
   if (state.privacyMode) {
@@ -280,7 +281,7 @@ function leaveTransferView() {
     })
   }
   renderGrid()
-  renderLoadMore()
+  renderPagination()
   renderTransferPanel()
 }
 
@@ -823,6 +824,15 @@ async function handleUploadFailure(task, error) {
   persistUploadTasks()
 }
 
+/** 多个文件连续完成时合并文件列表刷新，避免每个任务都触发一次列表查询。 */
+function scheduleUploadRefresh() {
+  if (uploadRefreshTimer) return
+  uploadRefreshTimer = window.setTimeout(() => {
+    uploadRefreshTimer = 0
+    void host().refresh({ silent: true })
+  }, 500)
+}
+
 async function syncUploadOffset(task) {
   const session = await getUploadSession(task)
   task.offset = Number(session.offset) || 0
@@ -908,7 +918,7 @@ async function runUploadTask(task) {
       if (result.file) {
         markUploadFinished(task)
         notify(`已上传：${task.name}`, 'ok')
-        await refresh({ silent: true })
+        scheduleUploadRefresh()
         return
       }
 
@@ -1590,7 +1600,7 @@ function clearCompletedVisibleTransfers() {
 }
 
 function bindTransferApp() {
-  const { $, $$, state, renderGrid, renderLoadMore } = host()
+  const { $, $$, state, renderGrid, renderPagination } = host()
   $('#transfer-btn').addEventListener('click', openTransferView)
   $$('[data-transfer-tab]').forEach((button) => {
     button.addEventListener('click', () => setTransferTab(button.dataset.transferTab))
@@ -1613,7 +1623,7 @@ function bindTransferApp() {
     if (event.target && event.target.closest && event.target.closest('input, textarea, select, [contenteditable="true"]')) return
     leaveTransferView()
     renderGrid()
-    renderLoadMore()
+    renderPagination()
   })
 }
 
