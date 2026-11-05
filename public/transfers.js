@@ -3,7 +3,7 @@
    ══════════════════════════════════════════════════════════════════════════
 
    本文件负责三件事：
-   1. 把上传改成 16 MiB 分块会话，支持暂停、继续、取消和刷新后恢复；
+   1. 把上传改成 8 MiB 分块会话，支持暂停、继续、取消和刷新后恢复；
    2. 在支持 File System Access API 的浏览器中，用 Range 分块写入用户选择的
       本地文件，实现可暂停的下载；不支持的浏览器回退到普通下载；
    3. 维护传输页面的任务列表、进度、速度和操作按钮。
@@ -12,7 +12,7 @@
    因此上传任务刷新后需要重新选择原文件，下载任务刷新后需要重新授权写入位置。
    ══════════════════════════════════════════════════════════════════════════ */
 
-const UPLOAD_CHUNK_BYTES = 16 * 1024 * 1024
+const UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024
 const DOWNLOAD_CHUNK_BYTES = 8 * 1024 * 1024
 const MAX_PARALLEL_UPLOADS = 2
 const UPLOAD_STORE_PREFIX = 'personal-vault:uploads:'
@@ -614,7 +614,8 @@ function uploadChunkRequest(task, blob, offset) {
     task.xhr = xhr
     xhr.open('PATCH', apiUrl(`/api/uploads/${encodeURIComponent(task.uploadId)}`))
     xhr.withCredentials = true
-    xhr.timeout = 120_000
+    // 慢速但持续有数据的上传不应被客户端固定总时长中断；连接完全停滞由服务端空闲超时处理。
+    xhr.timeout = 0
     xhr.setRequestHeader('Upload-Offset', String(offset))
     xhr.setRequestHeader('Upload-Length', String(task.size))
     xhr.setRequestHeader('Content-Type', 'application/octet-stream')
