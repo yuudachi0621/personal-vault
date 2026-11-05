@@ -257,7 +257,7 @@ function uniqueFiles(fileList) {
  *
  * 改动前端功能时记得同步这里和 package.json。
  */
-const APP_VERSION = '1.8.0'
+const APP_VERSION = '1.8.1'
 
 /**
  * 调用后端 JSON API，并把非 2xx 响应转换为异常。
@@ -842,6 +842,28 @@ function trashRemainText(record) {
   return `${Math.max(1, Math.floor(left / 60000))} 分钟后清除`
 }
 
+/**
+ * 视频封面优先使用服务端缓存的 JPEG 缩略图；首次生成失败时，
+ * 只对该卡片回退到原视频取帧，不影响其它媒体。
+ */
+function setupVideoThumbnails(root = document) {
+  $$('img[data-video-thumb]', root).forEach((img) => {
+    const fallback = img.nextElementSibling
+    if (!fallback || !fallback.matches('video[data-video-fallback]')) return
+
+    const showVideoFallback = () => {
+      if (!img.isConnected) return
+      img.remove()
+      fallback.hidden = false
+      fallback.src = fallback.dataset.src || ''
+      fallback.load()
+    }
+
+    if (img.complete && img.naturalWidth === 0) showVideoFallback()
+    else img.addEventListener('error', showVideoFallback, { once: true })
+  })
+}
+
 function cardHtml(record) {
   const raw = apiUrl(`/api/files/${record.id}/raw`)
   const inTrash = Boolean(record.deletedAt)
@@ -851,7 +873,9 @@ function cardHtml(record) {
   if (record.category === 'image') {
     thumb = `<img src="${raw}" alt="${escapeHtml(record.name)}" loading="lazy" decoding="async" draggable="false">`
   } else if (record.category === 'video') {
-    thumb = `<video src="${raw}#t=0.5" preload="metadata" muted playsinline draggable="false"></video>
+    const thumbnail = apiUrl(`/api/files/${record.id}/thumbnail`)
+    thumb = `<img class="video-thumb" src="${thumbnail}" alt="" loading="lazy" decoding="async" draggable="false" data-video-thumb>
+      <video data-video-fallback data-src="${raw}#t=0.5" preload="none" muted playsinline draggable="false" hidden></video>
       <div class="card-play"><span><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.2v13.6L19 12z"/></svg></span></div>`
   } else if (record.category === 'music') {
     thumb = musicGlyph(record)
@@ -943,6 +967,7 @@ function renderGrid() {
 
   empty.hidden = true
   grid.innerHTML = state.files.map(cardHtml).join('')
+  setupVideoThumbnails(grid)
   $$('.card', grid).forEach((card, index) => {
     card.style.animationDelay = `${Math.min(index * 22, 260)}ms`
   })
@@ -1132,7 +1157,9 @@ async function loadMore() {
     state.hasMore = data.page.hasMore
 
     // insertAdjacentHTML 把新卡片的 HTML 直接塞到网格末尾，不破坏已有的 DOM
-    $('#file-grid').insertAdjacentHTML('beforeend', data.files.map(cardHtml).join(''))
+    const grid = $('#file-grid')
+    grid.insertAdjacentHTML('beforeend', data.files.map(cardHtml).join(''))
+    setupVideoThumbnails(grid)
   } catch (error) {
     if (error.code === 'PRIVACY_LOCKED') {
       await recoverPrivacyAccess()

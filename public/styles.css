@@ -388,6 +388,7 @@ body.has-site-footer .app { min-height: calc(100dvh - 40px); }
   aspect-ratio: 4 / 3; background: var(--bg-soft); cursor: zoom-in; overflow: hidden;
 }
 .card-thumb img, .card-thumb video { width: 100%; height: 100%; object-fit: cover; display: block; }
+.card-thumb img.video-thumb { background: var(--bg-soft); }
 .card-thumb .file-glyph { display: grid; place-items: center; gap: 8px; color: var(--muted); }
 .card-thumb .file-glyph svg { width: 42px; height: 42px; }
 .card-thumb .file-glyph small { font-size: 11px; font-weight: 500; letter-spacing: .08em; text-transform: uppercase; }
@@ -512,13 +513,24 @@ body.has-site-footer .app { min-height: calc(100dvh - 40px); }
 }
 @keyframes pop-in { from { opacity: 0; transform: scale(.98) translateY(8px); } to { opacity: 1; transform: none; } }
 .lightbox-head {
-  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
-  padding: 13px 16px; border-bottom: 1px solid var(--border); flex: none;
+  position: relative;
+  display: flex; align-items: flex-start; gap: 10px 14px; flex-wrap: wrap;
+  padding: 13px 58px 13px 16px; border-bottom: 1px solid var(--border); flex: none;
 }
-.lightbox-meta { min-width: 0; flex: 1; }
+.lightbox-meta { min-width: 0; flex: 1 1 240px; padding-top: 3px; }
 .lightbox-meta strong { display: block; font-size: 14px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .lightbox-meta span { font-size: 12px; color: var(--muted); }
-.lightbox-tools { display: flex; align-items: center; gap: 8px; }
+.lightbox-tools {
+  display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap;
+  gap: 8px; min-width: 0; margin-left: auto;
+}
+.lightbox-close {
+  position: absolute; top: 10px; right: 12px; z-index: 4;
+  width: 36px; height: 36px; flex: none;
+  background: var(--surface); border: 1px solid var(--border);
+  box-shadow: var(--shadow-sm);
+}
+.lightbox-close:hover { background: var(--bg-soft); }
 .video-quality-control {
   display: inline-flex; align-items: center; gap: 6px;
   font-size: 12px; color: var(--muted); white-space: nowrap;
@@ -758,6 +770,20 @@ body.has-site-footer .app { min-height: calc(100dvh - 40px); }
   .toolbar-title h2 { font-size: 19px; }
   .lightbox { padding: 10px; }
   .lightbox-panel { height: calc(100dvh - 20px); max-height: calc(100dvh - 20px); border-radius: 12px; }
+  .lightbox-head {
+    display: grid; grid-template-columns: minmax(0, 1fr); gap: 7px;
+    padding: 10px 52px 10px 12px;
+  }
+  .lightbox-meta { padding-top: 1px; }
+  .lightbox-meta strong { font-size: 13px; }
+  .lightbox-tools {
+    width: 100%; margin-left: 0; justify-content: flex-start; gap: 6px;
+  }
+  .lightbox-tools .btn-sm { height: 32px; padding: 0 9px; font-size: 12px; }
+  .lightbox-tools .zoom-controls { flex: 1 1 auto; }
+  .video-quality-control { flex: 1 1 116px; justify-content: space-between; }
+  .video-quality-control select { flex: 1; min-width: 0; max-width: 112px; }
+  .lightbox-close { top: 7px; right: 8px; width: 36px; height: 36px; }
   .lightbox-body video, .zoom-img {
     top: 6px; left: 6px;
     width: calc(100% - 12px); height: calc(100% - 12px);

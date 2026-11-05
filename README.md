@@ -32,6 +32,7 @@
 | 上传 | 选择或拖拽、多选、进度提示、流式写盘、SHA-256 内容去重 |
 | 文件列表 | 分类、文件名搜索、四种排序、分页加载 |
 | 预览 | 图片缩放 / 平移 / 相邻预加载、自定义音频播放器、视频 720P / 原画切换 |
+| 视频封面 | FFmpeg 生成并缓存小尺寸 JPEG；失败时回退到视频取帧 |
 | 视频流 | HTTP Range、206 分段响应、ETag、慢速缓冲状态与有限次数自动重连 |
 | 下载 | 保留原始文件名，支持 Range；下载内容始终使用原始文件 |
 | 回收站 | 普通文件软删除、24 小时内恢复、到期或手动彻底删除 |
@@ -46,6 +47,7 @@
 - 图片：0.5x–8x 缩放，滚轮 / 双指 / 双击缩放，高倍率下拖动平移；灯箱按当前筛选结果左右切换。
 - 音频：页面内自定义播放器，支持播放、暂停、进度和音量。
 - 视频：优先请求 720P 副本 `/api/files/:id/preview`；没有合格副本时播放原始文件 `/api/files/:id/raw`。
+- 视频封面：列表优先请求 `/api/files/:id/thumbnail`，由服务端生成并缓存小尺寸 JPEG，避免为大视频反复下载视频数据取帧。
 - 视频拖动：服务端解析 `Range`，默认把单次 206 响应限制在 32MiB，降低超长连接占用。
 - 媒体缓存：响应带 ETag、Last-Modified 和私有缓存头，减少重复 Range 请求。
 - 卡顿恢复：连续约 8 秒没有新数据时才尝试重连，单次播放最多自动重连两次。
@@ -93,7 +95,8 @@
                                            ├─ lib/auth.js         密码哈希、签名令牌、Cookie
                                            ├─ lib/store.js        参数化 SQL 数据访问
                                            ├─ lib/media.js        MIME 与分类
-                                           └─ lib/video-preview.js 可选视频预览转码
+                                           ├─ lib/video-preview.js 可选视频预览转码
+                                           └─ lib/video-thumbnail.js 视频封面生成与缓存
                                                    │
                                                    └─ lib/db.js ──> data/vault.db
                                                                  └─ data/uploads/
@@ -130,7 +133,8 @@
 │  ├─ rate-limit.js                  内存固定窗口限流
 │  ├─ static.js                      public/ 静态资源、ETag、CSP
 │  ├─ store.js                       参数化 SQL 数据访问层
-│  └─ video-preview.js               可选视频 720P 预览生成与跳过标记
+│  ├─ video-preview.js               可选视频 720P 预览生成与跳过标记
+│  └─ video-thumbnail.js             视频封面生成、缓存与回退
 ├─ public/
 │  ├─ index.html
 │  ├─ app.js
@@ -343,6 +347,7 @@ npm run preview:video -- "7b694feb-ca1b-4e6b-a665-c146c43cd0ff"
 | `data/uploads/<ownerId>/` | 原始文件，磁盘名由随机 UUID + 安全扩展名组成 |
 | `data/previews/<ownerId>/<fileId>.mp4` | 可选 720P 播放副本 |
 | `data/previews/<ownerId>/<fileId>.mp4.skip.json` | 已确认“无法生成更小副本”的跳过标记 |
+| `data/previews/<ownerId>/<fileId>.thumb.jpg` | 视频列表封面缓存，最大 640×360 |
 | `data/secret.key` | 会话和隐私令牌 HMAC 密钥 |
 | `config.json` | 注册码配置 |
 
@@ -383,7 +388,16 @@ sqlite3 data/vault.db ".backup 'backup.db'"
 - 跳过标记记录原片大小、修改时间、CRF、峰值码率和音频码率。参数或原片变化后会自动失效。
 - 普通批处理遇到有效跳过标记时不会重复编码；`--force` 可强制重试。
 - 720P 副本不计入用户原始文件配额，但会额外占用服务器磁盘。
-- 删除原文件、回收站彻底删除和隐私文件永久删除都会同步清理预览和跳过标记。
+- 删除原文件、回收站彻底删除和隐私文件永久删除都会同步清理预览、封面和跳过标记。
+
+### 视频封面缩略图
+
+- 新上传的视频会在后台尝试生成封面。
+- 卡片封面优先读取服务端缓存的 JPEG，不再直接让浏览器从大视频取帧。
+- 缩略图最大 640×360，使用 7 天私有浏览器缓存。
+- 首次请求时如果封面不存在，会串行调用 FFmpeg 生成，避免同时启动多个转码进程。
+- FFmpeg 不可用或生成失败时，前端自动回退到原来的 `<video>` 取帧。
+- 原文件删除时会同步清理封面缓存。
 
 ### FFmpeg 安装
 
@@ -454,6 +468,7 @@ API 默认返回 JSON，错误格式为：
 | GET / HEAD | `/api/files/:id/raw` | 原始文件，支持 Range |
 | GET / HEAD | `/api/files/:id/download` | 附件下载，支持 Range |
 | GET / HEAD | `/api/files/:id/preview` | 720P 副本；不存在时回退原文件 |
+| GET / HEAD | `/api/files/:id/thumbnail` | 视频封面 JPEG；首次按需生成并缓存 |
 | PATCH | `/api/files/:id` | 普通文件改名 / 改分类 |
 | DELETE | `/api/files/:id` | 普通文件移入回收站 |
 | POST | `/api/files/:id/restore` | 从回收站恢复 |
@@ -657,7 +672,7 @@ git diff --check
 3. 上传照片、视频、音乐、普通文件并确认分类。
 4. 测试搜索、排序、分页、重命名和下载。
 5. 普通文件删除到回收站、恢复、彻底删除。
-6. 图片缩放 / 平移、音频播放、视频拖动和清晰度切换。
+6. 图片缩放 / 平移、音频播放、视频拖动、清晰度切换和视频封面缓存。
 7. 设置隐私密码、移入 / 移出隐私文件，确认普通列表不可见。
 8. 刷新页面后确认隐私空间重新锁定。
 9. 修改账号密码后确认旧隐私解锁失效。
