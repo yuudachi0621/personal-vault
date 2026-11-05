@@ -627,7 +627,7 @@ function uploadChunkRequest(task, blob, offset) {
       notePrivacyActivity()
       if (!event.lengthComputable) return
       updateTransferProgress(task, offset + event.loaded)
-      if (offset + event.total >= task.size && !task.finalizing) {
+      if (offset + event.loaded >= task.size && !task.finalizing) {
         task.finalizing = true
         renderTransferPanel()
       }
