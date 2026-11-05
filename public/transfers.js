@@ -103,7 +103,10 @@ function transferStatusText(task) {
     if (task.kind === 'upload' && !task.file) return '等待重新选择原文件'
     return task.waitingReason || '排队中'
   }
-  if (task.status === 'running') return task.kind === 'upload' ? '正在上传' : '正在下载'
+  if (task.status === 'running') {
+    if (task.kind === 'upload' && task.finalizing) return '正在校验并保存'
+    return task.kind === 'upload' ? '正在上传' : '正在下载'
+  }
   if (task.status === 'processing') return '正在校验并保存'
   if (task.status === 'cancelling') return '正在取消'
   if (task.status === 'paused') return '已暂停，可继续'
@@ -122,6 +125,7 @@ function transferTaskActions(task) {
     `<button type="button" class="${className}" data-transfer-action="${action}" data-transfer-kind="${kind}" data-transfer-id="${id}">${label}</button>`
 
   if (task.status === 'running') {
+    if (task.kind === 'upload' && task.finalizing) return '<button type="button" disabled>正在保存</button>'
     return `${button('pause', '暂停')}${button('cancel', '取消', 'is-danger')}`
   }
   if (task.status === 'waiting') {
@@ -532,6 +536,7 @@ function createUploadTask(file) {
     retryable: true,
     xhr: null,
     waitingReason: '',
+    finalizing: false,
     speed: 0,
     lastSampleAt: 0,
     lastSampleLoaded: 0,
@@ -613,9 +618,19 @@ function uploadChunkRequest(task, blob, offset) {
     xhr.setRequestHeader('Upload-Length', String(task.size))
     xhr.setRequestHeader('Content-Type', 'application/octet-stream')
 
+    if (!blob.size && !task.finalizing) {
+      task.finalizing = true
+      renderTransferPanel()
+    }
+
     xhr.upload.addEventListener('progress', (event) => {
       notePrivacyActivity()
-      if (event.lengthComputable) updateTransferProgress(task, offset + event.loaded)
+      if (!event.lengthComputable) return
+      updateTransferProgress(task, offset + event.loaded)
+      if (offset + event.total >= task.size && !task.finalizing) {
+        task.finalizing = true
+        renderTransferPanel()
+      }
     })
 
     const finish = () => {
@@ -727,6 +742,7 @@ function markUploadFinished(task) {
 
 async function handleUploadFailure(task, error) {
   const { showAuth, state, updatePrivacyIndicator } = host()
+  task.finalizing = false
   if (['paused', 'cancelled'].includes(task.status)) {
     task.loaded = task.offset
     resetTransferSpeed(task)
@@ -789,11 +805,22 @@ async function handleUploadFailure(task, error) {
 
   const transient = !status || status >= 500 || status === 408 || status === 429
   task.status = transient ? 'paused' : 'failed'
-  task.error = error && error.message ? error.message : '上传失败，请稍后重试'
+  task.error = error && error.finalizeStage
+    ? '服务器保存文件时暂时失败，点击继续重试'
+    : (error && error.message ? error.message : '上传失败，请稍后重试')
   task.retryable = transient || status < 500
   task.loaded = task.offset
   resetTransferSpeed(task)
   persistUploadTasks()
+}
+
+async function syncUploadOffset(task) {
+  const session = await getUploadSession(task)
+  task.offset = Number(session.offset) || 0
+  task.loaded = task.offset
+  task.finalizing = false
+  persistUploadTasks()
+  return session
 }
 
 async function runUploadTask(task) {
@@ -802,26 +829,50 @@ async function runUploadTask(task) {
   task.status = 'running'
   task.error = ''
   task.waitingReason = ''
+  task.finalizing = false
   resetTransferSpeed(task)
   scheduleTransferRender()
 
   try {
     await ensureUploadSession(task)
     let inProgressRetries = 0
-    while (task.status === 'running' && task.offset < task.size) {
-      const end = Math.min(task.size, task.offset + (task.chunkSize || UPLOAD_CHUNK_BYTES))
-      const blob = task.file.slice(task.offset, end)
+    let transientRetries = 0
+    let finalizeOnlyAttempts = 0
+
+    while (task.status === 'running') {
+      const finalizeOnly = task.offset >= task.size
+      if (finalizeOnly && ++finalizeOnlyAttempts > 3) {
+        const error = new Error('服务器多次未能完成文件保存，请取消后重新上传')
+        error.status = 500
+        error.finalizeStage = true
+        throw error
+      }
+      if (finalizeOnly) {
+        task.finalizing = true
+        scheduleTransferRender()
+      }
+
+      const blob = finalizeOnly
+        ? new Blob([])
+        : task.file.slice(task.offset, Math.min(task.size, task.offset + (task.chunkSize || UPLOAD_CHUNK_BYTES)))
       let result
       try {
         result = await uploadChunkRequest(task, blob, task.offset)
         inProgressRetries = 0
+        transientRetries = 0
       } catch (error) {
+        const wasFinalizing = task.finalizing || finalizeOnly
+        task.finalizing = false
         if (task.status !== 'running') break
+
         if (error.code === 'UPLOAD_OFFSET_MISMATCH') {
-          const session = await getUploadSession(task)
-          task.offset = Number(session.offset) || 0
-          task.loaded = task.offset
-          persistUploadTasks()
+          if (Number.isInteger(error.offset) && error.offset >= 0) {
+            task.offset = error.offset
+            task.loaded = task.offset
+            persistUploadTasks()
+          } else {
+            await syncUploadOffset(task)
+          }
           continue
         }
         if (error.code === 'UPLOAD_IN_PROGRESS' && inProgressRetries < 3) {
@@ -829,36 +880,41 @@ async function runUploadTask(task) {
           await new Promise((resolve) => setTimeout(resolve, 600 * inProgressRetries))
           continue
         }
+
+        const status = Number(error && error.status)
+        const transient = !status || status >= 500 || status === 408 || status === 429
+        if (error.code !== 'UPLOAD_BUSY' && transient && transientRetries < 2) {
+          transientRetries += 1
+          await new Promise((resolve) => setTimeout(resolve, 650 * transientRetries))
+          try { await syncUploadOffset(task) } catch { /* 下一轮请求会返回明确错误 */ }
+          continue
+        }
+        error.finalizeStage = wasFinalizing
         throw error
       }
 
-      task.offset = Math.max(task.offset, Number(result.offset) || task.offset + blob.size)
-      task.loaded = task.offset
-      persistUploadTasks()
-      notePrivacyActivity()
-      scheduleTransferRender()
-
+      task.finalizing = false
       if (result.file) {
         markUploadFinished(task)
         notify(`已上传：${task.name}`, 'ok')
         await refresh({ silent: true })
         return
       }
-    }
 
-    if (task.status === 'running' && task.offset >= task.size) {
-      const error = new Error('服务端没有完成文件保存，请继续重试')
-      error.code = 'UPLOAD_INCOMPLETE'
-      throw error
+      task.offset = Math.min(task.size, Math.max(task.offset, Number(result.offset) || task.offset + blob.size))
+      task.loaded = task.offset
+      persistUploadTasks()
+      notePrivacyActivity()
+      scheduleTransferRender()
     }
   } catch (error) {
     await handleUploadFailure(task, error)
   } finally {
+    task.finalizing = false
     resetTransferSpeed(task)
     scheduleTransferRender()
   }
 }
-
 function scheduleUploadQueuePump(delay = 0) {
   const { state } = host()
   if (!state.user || uploadPumpTimer) return
