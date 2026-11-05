@@ -36,6 +36,7 @@
 | 下载 | 保留原始文件名，支持 Range；下载内容始终使用原始文件 |
 | 回收站 | 普通文件软删除、24 小时内恢复、到期或手动彻底删除 |
 | 隐私空间 | 独立隐私密码、账号密码验证重置、短时解锁、隐私文件永久删除 |
+| 备案信息 | 可在前端配置中开启 ICP 备案页脚，显示备案号并链接工信部备案查询 |
 | 存储统计 | 普通用量、分类用量、回收站和隐私空间独立展示；配额包含回收站与隐私文件 |
 | 部署 | 单进程一体部署，或静态前端 + 独立 API 的跨域部署 |
 | 响应式 | 桌面侧栏、平板和手机布局 |
@@ -242,6 +243,11 @@ http://localhost:8787
 ```js
 window.VAULT_CONFIG = {
   apiBase: '',
+  icp: {
+    enabled: false,
+    number: '',
+    url: 'https://beian.miit.gov.cn/',
+  },
 }
 ```
 
@@ -250,10 +256,27 @@ window.VAULT_CONFIG = {
 ```js
 window.VAULT_CONFIG = {
   apiBase: 'https://api.example.com',
+  icp: {
+    enabled: false,
+    number: '',
+    url: 'https://beian.miit.gov.cn/',
+  },
 }
 ```
 
 由于 HTML CSP 为 `script-src 'self'`，不能在 `index.html` 中通过内联 `<script>` 覆盖该配置。必须修改或替换 `public/config.js`。
+
+启用备案页脚：
+
+```js
+icp: {
+  enabled: true,
+  number: '京ICP备12345678号-1',
+  url: 'https://beian.miit.gov.cn/',
+}
+```
+
+只有 `enabled` 为 `true` 且 `number` 非空时才显示页脚；备案号会以纯文本插入，链接只接受 `http:` / `https:`，非法地址回退到工信部备案查询页。
 
 ### 3. 环境变量
 

@@ -61,6 +61,37 @@ const CATEGORY_LABEL = { all: '全部', image: '照片', video: '视频', music:
 const API_BASE = String((window.VAULT_CONFIG && window.VAULT_CONFIG.apiBase) || '').replace(/\/+$/, '')
 const apiUrl = (path) => `${API_BASE}${path}`
 
+const DEFAULT_ICP_URL = 'https://beian.miit.gov.cn/'
+
+/** 只允许 HTTP(S) 备案查询地址，非法配置回退到工信部官方入口。 */
+function resolveIcpUrl(value) {
+  try {
+    const parsed = new URL(String(value || DEFAULT_ICP_URL), window.location.href)
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? parsed.href : DEFAULT_ICP_URL
+  } catch {
+    return DEFAULT_ICP_URL
+  }
+}
+
+/** 根据 public/config.js 的 icp 配置显示或隐藏全站备案页脚。 */
+function applySiteFooter() {
+  const footer = $('#site-footer')
+  const link = $('#icp-link')
+  if (!footer || !link) return
+
+  const icp = (window.VAULT_CONFIG && window.VAULT_CONFIG.icp) || {}
+  const number = String(icp.number || '').trim()
+  const enabled = icp.enabled === true && Boolean(number)
+
+  document.body.classList.toggle('has-site-footer', enabled)
+  footer.hidden = !enabled
+  if (!enabled) return
+
+  link.href = resolveIcpUrl(icp.url)
+  link.textContent = number
+  link.setAttribute('aria-label', `查看 ${number} 备案信息`)
+}
+
 /**
  * 整个界面的「状态」。可以理解为这一屏界面上所有会变的东西都记在这里。
  *
@@ -226,7 +257,7 @@ function uniqueFiles(fileList) {
  *
  * 改动前端功能时记得同步这里和 package.json。
  */
-const APP_VERSION = '1.7.3'
+const APP_VERSION = '1.8.0'
 
 /**
  * 调用后端 JSON API，并把非 2xx 响应转换为异常。
@@ -2539,6 +2570,7 @@ async function boot() {
   // 把前端版本号写进界面，方便判断当前跑的是哪一版
   $('#app-version').textContent = `v${APP_VERSION}`
   $('#auth-version').textContent = `v${APP_VERSION}`
+  applySiteFooter()
 
   // 先挂监听器。这样即使用户在数据还没加载完时就点击，也能正常响应。
   bindAuth()   // 登录/注册表单、用户菜单、修改密码弹窗

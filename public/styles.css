@@ -58,9 +58,12 @@
 
 * { box-sizing: border-box; }
 
-html, body { height: 100%; }
+html, body { min-height: 100%; }
 
 body {
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
   margin: 0;
   background: var(--bg);
   color: var(--text);
@@ -137,7 +140,7 @@ a { color: inherit; text-decoration: none; }
 }
 
 /* ─────────────────────────── 登录页 ─────────────────────────── */
-.auth { display: grid; grid-template-columns: 1.02fr .98fr; min-height: 100dvh; }
+.auth { flex: 1; display: grid; grid-template-columns: 1.02fr .98fr; min-height: 100dvh; }
 
 /* 左侧品牌区：暖米底 + 衬线大标题，不用彩色渐变 */
 .auth-brand {
@@ -194,7 +197,36 @@ a { color: inherit; text-decoration: none; }
 .auth-foot { margin: 22px 0 0; font-size: 12.5px; color: var(--muted); text-align: center; line-height: 1.65; }
 
 /* ─────────────────────────── 顶栏 ─────────────────────────── */
-.app { min-height: 100dvh; display: flex; flex-direction: column; }
+.app { flex: 1; min-height: 100dvh; display: flex; flex-direction: column; }
+
+/* 启用备案页脚时给主视图让出固定高度，避免页面出现不必要的纵向滚动 */
+body.has-site-footer .auth,
+body.has-site-footer .app { min-height: calc(100dvh - 40px); }
+
+.site-footer {
+  flex: none;
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  padding: 7px 16px calc(7px + env(safe-area-inset-bottom));
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: center;
+}
+.site-footer a {
+  color: var(--text-2);
+  text-decoration: underline;
+  text-decoration-color: transparent;
+  text-underline-offset: 3px;
+  transition: color .16s, text-decoration-color .16s;
+}
+.site-footer a:hover {
+  color: var(--brand-600);
+  text-decoration-color: currentColor;
+}
 
 .topbar {
   position: sticky; top: 0; z-index: 40;

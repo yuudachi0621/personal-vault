@@ -10,18 +10,19 @@
 
      这就是单页应用（SPA）的特点：HTML 负责搭结构，JS 负责填内容。
 
-   【页面主要由四块组成】
+   【页面主要区块】
      1. #auth-view    未登录时显示的登录/注册页
      2. #app-view     登录后显示的主界面（顶栏 + 侧栏 + 文件网格）
      3. #lightbox     点开文件后的预览大图/播放器
-     4. #password-modal、#toasts  弹窗与提示条
+     4. 密码 / 隐私空间弹窗与 #toasts 提示条
+     5. #site-footer  可选的 ICP 备案信息
 
      前两块初始都带 hidden 属性（即隐藏）。到底显示哪一个，
      由 app.js 里的 boot() 问过服务器「我登录了吗」之后决定。
 
-   【三个 script 标签的顺序不能换】
-     1. config.js  先定义后端地址（apiBase）
-     2. app.js     再读取这个地址去发请求
+   【两个 script 标签的顺序不能换】
+     1. config.js  先定义后端地址和备案配置
+     2. app.js     再读取配置并发请求
      依赖关系决定了顺序，调换会导致读不到配置。
 -->
 <html lang="zh-CN">
@@ -31,8 +32,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#faf9f5">
   <title>个人云存储 · 视频 / 照片 / 文件</title>
-  <link rel="icon" href="/favicon.svg?v=1.7.3">
-  <link rel="stylesheet" href="/styles.css?v=1.7.3">
+  <link rel="icon" href="/favicon.svg?v=1.8.0">
+  <link rel="stylesheet" href="/styles.css?v=1.8.0">
 </head>
 
 <body>
@@ -337,6 +338,12 @@
     </div>
   </div>
 
+  <!-- ICP 备案信息：内容由 public/config.js 控制，默认隐藏 -->
+  <footer id="site-footer" class="site-footer" hidden>
+    <span>ICP备案号：</span>
+    <a id="icp-link" href="https://beian.miit.gov.cn/" target="_blank" rel="noopener noreferrer"></a>
+  </footer>
+
   <!-- ══════════════════════════ 预览灯箱 ══════════════════════════ -->
   <div id="lightbox" class="lightbox" hidden>
     <div class="lightbox-backdrop" data-close></div>
@@ -461,8 +468,8 @@
 
   <div id="toasts" class="toasts" aria-live="polite"></div>
 
-  <script src="/config.js?v=1.7.3"></script>
-  <script src="/app.js?v=1.7.3"></script>
+  <script src="/config.js?v=1.8.0"></script>
+  <script src="/app.js?v=1.8.0"></script>
 </body>
 
 </html>
