@@ -14,7 +14,7 @@
 
 const UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024
 const DOWNLOAD_CHUNK_BYTES = 8 * 1024 * 1024
-const MAX_PARALLEL_UPLOADS = 3
+const MAX_PARALLEL_UPLOADS = 2
 const UPLOAD_STORE_PREFIX = 'personal-vault:uploads:'
 const DOWNLOAD_STORE_PREFIX = 'personal-vault:downloads:'
 const TRANSFER_RENDER_DELAY_MS = 120
@@ -32,6 +32,12 @@ const transfers = {
 const uploadRuns = new Map()
 const downloadRuns = new Map()
 let transferDbPromise = null
+let uploadPumpTimer = 0
+let uploadQueueBlockedUntil = 0
+let uploadQueueBusyDelay = 0
+let uploadQueueProbeOnly = false
+const UPLOAD_BUSY_RETRY_MS = 3000
+const UPLOAD_BUSY_MAX_RETRY_MS = 60000
 
 function host() {
   const value = window.VaultTransferHost
@@ -95,7 +101,7 @@ function transferCanRetry(task) {
 function transferStatusText(task) {
   if (task.status === 'waiting') {
     if (task.kind === 'upload' && !task.file) return '等待重新选择原文件'
-    return '排队中'
+    return task.waitingReason || '排队中'
   }
   if (task.status === 'running') return task.kind === 'upload' ? '正在上传' : '正在下载'
   if (task.status === 'processing') return '正在校验并保存'
@@ -118,7 +124,13 @@ function transferTaskActions(task) {
   if (task.status === 'running') {
     return `${button('pause', '暂停')}${button('cancel', '取消', 'is-danger')}`
   }
-  if (['waiting', 'paused', 'failed'].includes(task.status)) {
+  if (task.status === 'waiting') {
+    if (task.kind === 'upload' && !task.file) {
+      return `${button('resume', '选择文件继续')}${button('remove', '移除', 'is-danger')}`
+    }
+    return `${button('pause', '暂停')}${button('cancel', '取消', 'is-danger')}`
+  }
+  if (['paused', 'failed'].includes(task.status)) {
     if (!transferCanRetry(task)) return button('remove', '移除')
     const resumeLabel = task.kind === 'upload' && !task.file ? '选择文件继续' : '继续'
     const cancelAction = task.kind === 'upload' && task.uploadId ? 'cancel' : 'remove'
@@ -519,6 +531,7 @@ function createUploadTask(file) {
     error: '',
     retryable: true,
     xhr: null,
+    waitingReason: '',
     speed: 0,
     lastSampleAt: 0,
     lastSampleLoaded: 0,
@@ -562,7 +575,7 @@ async function enqueueUploadFiles(fileList) {
   if (reused && !added) notify('相同文件已在上传队列中，已复用原任务', 'ok')
   if (added || reused) {
     renderTransferPanel()
-    pumpUploadQueue()
+    scheduleUploadQueuePump()
   }
 }
 
@@ -673,7 +686,10 @@ async function createUploadSession(task) {
   task.offset = Number(data.upload.offset) || 0
   task.loaded = task.offset
   task.chunkSize = Number(data.upload.chunkSize) || UPLOAD_CHUNK_BYTES
+  uploadQueueBusyDelay = 0
+  uploadQueueProbeOnly = false
   persistUploadTasks()
+  scheduleUploadQueuePump()
   return data.upload
 }
 
@@ -737,6 +753,22 @@ async function handleUploadFailure(task, error) {
     persistUploadTasks()
     return
   }
+  if (code === 'UPLOAD_BUSY') {
+    task.status = 'waiting'
+    task.waitingReason = '等待其他上传完成'
+    task.error = ''
+    task.retryable = true
+    task.loaded = task.offset
+    resetTransferSpeed(task)
+    uploadQueueProbeOnly = true
+    uploadQueueBusyDelay = uploadQueueBusyDelay
+      ? Math.min(uploadQueueBusyDelay * 2, UPLOAD_BUSY_MAX_RETRY_MS)
+      : UPLOAD_BUSY_RETRY_MS
+    uploadQueueBlockedUntil = Date.now() + uploadQueueBusyDelay
+    persistUploadTasks()
+    scheduleUploadQueuePump()
+    return
+  }
   if (code === 'DUPLICATE_FILE') {
     task.status = 'failed'
     task.error = error.message
@@ -769,6 +801,7 @@ async function runUploadTask(task) {
   if (!task.file || !state.user) return
   task.status = 'running'
   task.error = ''
+  task.waitingReason = ''
   resetTransferSpeed(task)
   scheduleTransferRender()
 
@@ -826,10 +859,26 @@ async function runUploadTask(task) {
   }
 }
 
+function scheduleUploadQueuePump(delay = 0) {
+  const { state } = host()
+  if (!state.user || uploadPumpTimer) return
+  const wait = Math.max(delay, uploadQueueBlockedUntil - Date.now(), 0)
+  uploadPumpTimer = window.setTimeout(() => {
+    uploadPumpTimer = 0
+    pumpUploadQueue()
+  }, wait)
+}
+
 function pumpUploadQueue() {
   const { state } = host()
   if (!state.user) return
-  while (uploadRuns.size < MAX_PARALLEL_UPLOADS) {
+  const blockedFor = uploadQueueBlockedUntil - Date.now()
+  if (blockedFor > 0) {
+    scheduleUploadQueuePump(blockedFor)
+    return
+  }
+  const concurrency = uploadQueueProbeOnly ? 1 : MAX_PARALLEL_UPLOADS
+  while (uploadRuns.size < concurrency) {
     const task = transfers.uploads.find((item) => (
       item.status === 'waiting' && item.file && !uploadRuns.has(item.id)
     ))
@@ -839,7 +888,7 @@ function pumpUploadQueue() {
       .finally(() => {
         uploadRuns.delete(task.id)
         scheduleTransferRender()
-        pumpUploadQueue()
+        scheduleUploadQueuePump()
       })
     uploadRuns.set(task.id, run)
   }
@@ -882,9 +931,10 @@ function pickFileForUploadTask(task) {
     task.error = ''
     task.retryable = true
     task.status = 'waiting'
+    task.waitingReason = ''
     resetTransferSpeed(task)
     renderTransferPanel()
-    pumpUploadQueue()
+    scheduleUploadQueuePump()
   }, { once: true })
   document.body.appendChild(input)
   input.click()
@@ -898,9 +948,10 @@ async function resumeUploadTask(task) {
   }
   task.status = 'waiting'
   task.error = ''
+  task.waitingReason = ''
   resetTransferSpeed(task)
   renderTransferPanel()
-  pumpUploadQueue()
+  scheduleUploadQueuePump()
 }
 
 async function cancelUploadTask(task) {
@@ -933,8 +984,10 @@ async function cancelUploadTask(task) {
   task.uploadId = null
   task.file = null
   task.speed = 0
+  task.waitingReason = ''
   persistUploadTasks()
   renderTransferPanel()
+  scheduleUploadQueuePump()
 }
 /* ── 可续传下载（File System Access API） ─────────────────────────── */
 
