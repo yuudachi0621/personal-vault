@@ -258,7 +258,7 @@ function uniqueFiles(fileList) {
  *
  * 改动前端功能时记得同步这里和 package.json。
  */
-const APP_VERSION = '1.8.4'
+const APP_VERSION = '1.8.5'
 
 /**
  * 调用后端 JSON API，并把非 2xx 响应转换为异常。
@@ -315,7 +315,9 @@ function createToast({ title, sub = '', kind = '' }) {
     <div class="toast-head"><span class="dot"></span><span class="toast-name"></span></div>
     ${sub ? '<div class="toast-sub"></div>' : ''}
     <div class="toast-track"><i></i></div>`
-  $('.toast-name', el).textContent = title
+  const nameEl = $('.toast-name', el)
+  nameEl.textContent = title
+  nameEl.title = title
   const subEl = $('.toast-sub', el)
   if (subEl) subEl.textContent = sub
   $('#toasts').appendChild(el)

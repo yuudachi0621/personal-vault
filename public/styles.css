@@ -703,21 +703,26 @@ body.has-site-footer .app { min-height: calc(100dvh - 40px); }
 /* ─────────────────────────── 提示条 ─────────────────────────── */
 .toasts {
   position: fixed; right: 18px; bottom: 18px; z-index: 200;
-  display: grid; gap: 10px; width: min(344px, calc(100vw - 36px));
+  display: grid; gap: 10px; width: min(420px, calc(100vw - 24px));
 }
 .toast {
-  display: grid; gap: 7px; padding: 12px 14px;
+  display: grid; gap: 7px; min-width: 0; padding: 12px 14px; overflow: hidden;
   background: var(--surface); border: 1px solid var(--border);
   border-radius: 11px; box-shadow: var(--shadow-md);
   animation: slide-in .24s cubic-bezier(.4, 0, .2, 1) both;
 }
 @keyframes slide-in { from { opacity: 0; transform: translateX(16px); } to { opacity: 1; transform: none; } }
-.toast-head { display: flex; align-items: center; gap: 9px; font-size: 13.5px; font-weight: 500; }
-.toast-head .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--brand); flex: none; }
+.toast-head { display: flex; align-items: flex-start; gap: 9px; min-width: 0; font-size: 13.5px; font-weight: 500; }
+.toast-head .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--brand); flex: none; margin-top: 6px; }
 .toast.is-ok .toast-head .dot { background: var(--ok); }
 .toast.is-error .toast-head .dot { background: var(--danger); }
-.toast-name { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.toast-sub { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.toast-name {
+  min-width: 0; flex: 1; overflow: hidden;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3;
+  overflow-wrap: anywhere; word-break: break-word;
+  line-height: 1.45;
+}
+.toast-sub { min-width: 0; overflow-wrap: anywhere; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .toast-track { height: 4px; border-radius: 999px; background: var(--bg-soft); overflow: hidden; }
 .toast-track i { display: block; height: 100%; width: 0; border-radius: 999px; background: var(--brand); transition: width .2s linear; }
 .toast.is-ok .toast-track i { background: var(--ok); }
