@@ -285,7 +285,7 @@ function uniqueFiles(fileList) {
  *
  * 改动前端功能时记得同步这里和 package.json。
  */
-const APP_VERSION = '1.9.4'
+const APP_VERSION = '1.9.5'
 
 /**
  * 调用后端 JSON API，并把非 2xx 响应转换为异常。
