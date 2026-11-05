@@ -388,7 +388,7 @@ body.has-site-footer .app { min-height: calc(100dvh - 40px); }
   aspect-ratio: 4 / 3; background: var(--bg-soft); cursor: zoom-in; overflow: hidden;
 }
 .card-thumb img, .card-thumb video { width: 100%; height: 100%; object-fit: cover; display: block; }
-.card-thumb img.video-thumb { background: var(--bg-soft); }
+.card-thumb img.media-thumb { background: var(--bg-soft); }
 .card-thumb .file-glyph { display: grid; place-items: center; gap: 8px; color: var(--muted); }
 .card-thumb .file-glyph svg { width: 42px; height: 42px; }
 .card-thumb .file-glyph small { font-size: 11px; font-weight: 500; letter-spacing: .08em; text-transform: uppercase; }

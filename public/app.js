@@ -257,7 +257,7 @@ function uniqueFiles(fileList) {
  *
  * 改动前端功能时记得同步这里和 package.json。
  */
-const APP_VERSION = '1.8.1'
+const APP_VERSION = '1.8.2'
 
 /**
  * 调用后端 JSON API，并把非 2xx 响应转换为异常。
@@ -843,24 +843,38 @@ function trashRemainText(record) {
 }
 
 /**
- * 视频封面优先使用服务端缓存的 JPEG 缩略图；首次生成失败时，
- * 只对该卡片回退到原视频取帧，不影响其它媒体。
+ * 照片和视频封面优先使用服务端缓存的 JPEG 缩略图。
+ * 照片生成失败时回退原图；视频失败时回退到原视频取帧。
  */
-function setupVideoThumbnails(root = document) {
-  $$('img[data-video-thumb]', root).forEach((img) => {
-    const fallback = img.nextElementSibling
-    if (!fallback || !fallback.matches('video[data-video-fallback]')) return
+function setupMediaThumbnails(root = document) {
+  $$('img[data-media-thumb]', root).forEach((img) => {
+    const videoFallback = img.nextElementSibling
+    const canFallbackToVideo = videoFallback && videoFallback.matches('video[data-video-fallback]')
+    let usedOriginalImage = false
 
-    const showVideoFallback = () => {
+    const handleError = () => {
       if (!img.isConnected) return
+      const originalSrc = img.dataset.fallbackSrc || ''
+
+      if (originalSrc && !usedOriginalImage) {
+        usedOriginalImage = true
+        img.src = originalSrc
+        return
+      }
+
+      if (canFallbackToVideo) {
+        img.remove()
+        videoFallback.hidden = false
+        videoFallback.src = videoFallback.dataset.src || ''
+        videoFallback.load()
+        return
+      }
+
       img.remove()
-      fallback.hidden = false
-      fallback.src = fallback.dataset.src || ''
-      fallback.load()
     }
 
-    if (img.complete && img.naturalWidth === 0) showVideoFallback()
-    else img.addEventListener('error', showVideoFallback, { once: true })
+    img.addEventListener('error', handleError)
+    if (img.complete && img.naturalWidth === 0) handleError()
   })
 }
 
@@ -871,10 +885,11 @@ function cardHtml(record) {
 
   let thumb
   if (record.category === 'image') {
-    thumb = `<img src="${raw}" alt="${escapeHtml(record.name)}" loading="lazy" decoding="async" draggable="false">`
+    const thumbnail = apiUrl(`/api/files/${record.id}/thumbnail`)
+    thumb = `<img class="media-thumb" src="${thumbnail}" alt="" loading="lazy" decoding="async" draggable="false" data-media-thumb data-fallback-src="${raw}">`
   } else if (record.category === 'video') {
     const thumbnail = apiUrl(`/api/files/${record.id}/thumbnail`)
-    thumb = `<img class="video-thumb" src="${thumbnail}" alt="" loading="lazy" decoding="async" draggable="false" data-video-thumb>
+    thumb = `<img class="media-thumb" src="${thumbnail}" alt="" loading="lazy" decoding="async" draggable="false" data-media-thumb>
       <video data-video-fallback data-src="${raw}#t=0.5" preload="none" muted playsinline draggable="false" hidden></video>
       <div class="card-play"><span><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.2v13.6L19 12z"/></svg></span></div>`
   } else if (record.category === 'music') {
@@ -967,7 +982,7 @@ function renderGrid() {
 
   empty.hidden = true
   grid.innerHTML = state.files.map(cardHtml).join('')
-  setupVideoThumbnails(grid)
+  setupMediaThumbnails(grid)
   $$('.card', grid).forEach((card, index) => {
     card.style.animationDelay = `${Math.min(index * 22, 260)}ms`
   })
@@ -1159,7 +1174,7 @@ async function loadMore() {
     // insertAdjacentHTML 把新卡片的 HTML 直接塞到网格末尾，不破坏已有的 DOM
     const grid = $('#file-grid')
     grid.insertAdjacentHTML('beforeend', data.files.map(cardHtml).join(''))
-    setupVideoThumbnails(grid)
+    setupMediaThumbnails(grid)
   } catch (error) {
     if (error.code === 'PRIVACY_LOCKED') {
       await recoverPrivacyAccess()
