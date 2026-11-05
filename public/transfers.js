@@ -769,6 +769,15 @@ async function handleUploadFailure(task, error) {
     persistUploadTasks()
     return
   }
+  if (code === 'UPLOAD_IN_PROGRESS') {
+    task.status = 'paused'
+    task.error = '服务器仍在处理上一分块，请稍后点击继续'
+    task.retryable = true
+    task.loaded = task.offset
+    resetTransferSpeed(task)
+    persistUploadTasks()
+    return
+  }
   if (code === 'UPLOAD_BUSY') {
     task.status = 'waiting'
     task.waitingReason = '等待其他上传完成'
@@ -875,9 +884,11 @@ async function runUploadTask(task) {
           }
           continue
         }
-        if (error.code === 'UPLOAD_IN_PROGRESS' && inProgressRetries < 3) {
+        if (error.code === 'UPLOAD_IN_PROGRESS' && inProgressRetries < 12) {
           inProgressRetries += 1
-          await new Promise((resolve) => setTimeout(resolve, 600 * inProgressRetries))
+          const waitMs = Math.min(5000, 500 * (2 ** (inProgressRetries - 1)))
+          await new Promise((resolve) => setTimeout(resolve, waitMs))
+          try { await syncUploadOffset(task) } catch { /* 下一轮继续查询服务端状态 */ }
           continue
         }
 
