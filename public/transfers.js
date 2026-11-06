@@ -289,12 +289,14 @@ function scheduleTransferRender() {
 }
 
 function openTransferView() {
-  const { $, $$, state } = host()
+  const { $, $$, state, pushMobileBackAction } = host()
+  const wasActive = state.transferMode
   state.transferMode = true
   $$('#cat-list .cat-item').forEach((item) => item.classList.toggle('is-active', item.id === 'transfer-btn'))
   $('#privacy-btn').classList.remove('is-active')
   $('#trash-btn').classList.remove('is-active')
   renderTransferPanel()
+  if (!wasActive) pushMobileBackAction('transfer', () => leaveTransferView())
 }
 
 function leaveTransferView() {
@@ -1754,7 +1756,7 @@ function clearCompletedVisibleTransfers() {
 }
 
 function bindTransferApp() {
-  const { $, $$, state, renderGrid, renderPagination } = host()
+  const { $, $$, state, renderGrid, renderPagination, requestMobileBack } = host()
   $('#transfer-btn').addEventListener('click', openTransferView)
   $$('[data-transfer-tab]').forEach((button) => {
     button.addEventListener('click', () => setTransferTab(button.dataset.transferTab))
@@ -1775,6 +1777,7 @@ function bindTransferApp() {
   document.addEventListener('keydown', (event) => {
     if (event.key !== 'Escape' || !state.transferMode) return
     if (event.target && event.target.closest && event.target.closest('input, textarea, select, [contenteditable="true"]')) return
+    if (requestMobileBack()) return
     leaveTransferView()
     renderGrid()
     renderPagination()

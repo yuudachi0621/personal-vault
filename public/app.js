@@ -147,6 +147,9 @@ window.VaultTransferHost = {
   notify,
   refresh,
   showAuth,
+  pushMobileBackAction,
+  requestMobileBack,
+  discardMobileBackActions,
   requestPrivacyUnlock,
   updatePrivacyIndicator,
   notePrivacyActivity,
@@ -190,6 +193,87 @@ const SORT_BY_FIELD = {
   type: { asc: 'type', desc: 'type-desc' },
   modified: { asc: 'updated-asc', desc: 'updated' },
 }
+/**
+ * 移动端 / 浏览器返回键的分层返回栈。
+ *
+ * 只为当前最上层维护一个 History 哨兵。返回时执行栈顶动作，若仍有可返回界面再补一个
+ * 哨兵；这样不会为每个弹窗、预览或文件夹层级留下大量无效历史记录。所有实际动作都在
+ * popstate 中执行，确保系统返回、手势返回和页面内关闭按钮使用同一套语义。
+ */
+const MOBILE_BACK_STATE_KEY = 'vaultMobileBackGuard'
+const mobileBackActions = []
+let mobileBackGuardActive = false
+let mobileBackConsumePending = false
+let mobileBackRequestPending = false
+let mobileBackHandling = false
+
+function maybeArmMobileBackGuard() {
+  if (!state.user || mobileBackHandling || mobileBackConsumePending || mobileBackGuardActive || !mobileBackActions.length) return
+  history.pushState({ ...(history.state || {}), [MOBILE_BACK_STATE_KEY]: true }, '', location.href)
+  mobileBackGuardActive = true
+}
+
+/** 注册一层返回动作；相同 key 连续注册时只保留最上层一个。 */
+function pushMobileBackAction(key, action) {
+  if (mobileBackActions.at(-1)?.key === key) return
+  mobileBackActions.push({ key, action })
+  maybeArmMobileBackGuard()
+}
+
+/** 移除指定层；若栈因此为空，则消费掉 History 哨兵。 */
+function discardMobileBackActions(keys) {
+  const remove = new Set(keys)
+  for (let index = mobileBackActions.length - 1; index >= 0; index -= 1) {
+    if (remove.has(mobileBackActions[index].key)) mobileBackActions.splice(index, 1)
+  }
+  if (!mobileBackActions.length && mobileBackGuardActive) {
+    mobileBackGuardActive = false
+    mobileBackConsumePending = true
+    if (!mobileBackRequestPending) history.back()
+  } else {
+    maybeArmMobileBackGuard()
+  }
+}
+
+/** 页面内关闭按钮也走系统返回流程，避免关闭后留下无效哨兵。 */
+function requestMobileBack() {
+  if (mobileBackHandling || !mobileBackGuardActive || !mobileBackActions.length) return false
+  if (mobileBackRequestPending) return true
+  mobileBackRequestPending = true
+  history.back()
+  return true
+}
+
+async function handleMobileBackPopstate() {
+  mobileBackRequestPending = false
+  if (mobileBackConsumePending) {
+    mobileBackConsumePending = false
+    maybeArmMobileBackGuard()
+    return
+  }
+  if (!mobileBackGuardActive) return
+  mobileBackGuardActive = false
+  const entry = mobileBackActions.pop()
+  if (!entry) return
+  mobileBackHandling = true
+  try {
+    await entry.action()
+  } finally {
+    mobileBackHandling = false
+    maybeArmMobileBackGuard()
+  }
+}
+
+/** 登录状态切换时清空内存层和当前历史条目标记。 */
+function resetMobileBackHistory() {
+  mobileBackActions.length = 0
+  mobileBackGuardActive = false
+  mobileBackConsumePending = false
+  mobileBackRequestPending = false
+  mobileBackHandling = false
+  try { history.replaceState({}, '', location.href) } catch { /* History 不可用时不影响页面 */ }
+}
+
 const PRIVACY_IDLE_MS = 10 * 60 * 1000
 const PRIVACY_HEARTBEAT_MS = 4 * 60 * 1000
 let privacyIdleTimer = 0
@@ -445,6 +529,7 @@ function notify(message, kind = 'error') {
  */
 function showAuth() {
   if (window.VaultTransfers) window.VaultTransfers.pauseForAuth()
+  resetMobileBackHistory()
   resetPrivacyState()
   state.user = null
   state.transferMode = false
@@ -465,7 +550,14 @@ function showAuth() {
   $('#auth-view').hidden = false
   $('#pagination').hidden = true
   closeLightbox()
+  closePasswordDialog({ force: true })
+}
+
+function closePasswordDialog({ force = false } = {}) {
+  if (!force && requestMobileBack()) return
   $('#password-modal').hidden = true
+  $('#password-form').reset()
+  if (force) discardMobileBackActions(['password-modal'])
 }
 
 function updatePrivacyIndicator() {
@@ -482,7 +574,8 @@ function clearPrivacyIdleTimer() {
   privacyIdleTimer = 0
 }
 
-function closePrivacyAuthDialog(success = false) {
+function closePrivacyAuthDialog(success = false, { force = false } = {}) {
+  if (!force && requestMobileBack()) return
   const modal = $('#privacy-modal')
   const form = $('#privacy-form')
   if (modal) modal.hidden = true
@@ -492,6 +585,7 @@ function closePrivacyAuthDialog(success = false) {
     privacyAuthResolver = null
     resolve(Boolean(success))
   }
+  if (force) discardMobileBackActions(['privacy-modal'])
 }
 
 function resetPrivacyState() {
@@ -499,7 +593,7 @@ function resetPrivacyState() {
   state.privacyMode = false
   state.privacyUnlocked = false
   privacyHeartbeatAt = 0
-  closePrivacyAuthDialog(false)
+  closePrivacyAuthDialog(false, { force: true })
   updatePrivacyIndicator()
   window.VaultTransfers?.render()
 }
@@ -569,6 +663,7 @@ function openPrivacyAuthDialog() {
   return new Promise((resolve) => {
     if (privacyAuthResolver) privacyAuthResolver(false)
     privacyAuthResolver = resolve
+    pushMobileBackAction('privacy-modal', () => closePrivacyAuthDialog(false, { force: true }))
   })
 }
 
@@ -619,7 +714,7 @@ async function submitPrivacyAuth(form) {
     updatePrivacyIndicator()
     window.VaultTransfers?.render()
     notePrivacyActivity()
-    closePrivacyAuthDialog(true)
+    closePrivacyAuthDialog(true, { force: true })
     if (mode === 'reset') notify('隐私密码已重置，旧解锁会话已失效', 'ok')
   } catch (error) {
     errorBox.textContent = error.message
@@ -674,12 +769,13 @@ async function lockPrivacySpace({ switchToAll = false, silent = true, skipHeartb
     try { await privacyHeartbeatPromise } catch { /* 下面统一清除 Cookie */ }
   }
   const wasPrivate = state.privacyMode || state.privacyUnlocked
+  if (wasPrivate) discardMobileBackActions(['privacy', 'privacy-modal'])
   if (wasPrivate) window.VaultTransfers?.pausePrivate()
   state.privacyMode = false
   state.privacyUnlocked = false
   privacyHeartbeatAt = 0
-  closePrivacyAuthDialog(false)
-  closeLightbox()
+  closePrivacyAuthDialog(false, { force: true })
+  closeLightbox({ force: true })
   updatePrivacyIndicator()
   window.VaultTransfers?.render()
   if (state.user) {
@@ -716,15 +812,21 @@ async function recoverPrivacyAccess() {
 }
 
 async function enterPrivacySpace() {
-  if (state.transferMode && window.VaultTransfers) window.VaultTransfers.leave()
+  if (state.transferMode) {
+    discardMobileBackActions(['transfer'])
+    window.VaultTransfers?.leave()
+  }
   if (state.privacyMode && state.privacyUnlocked) {
+    if (requestMobileBack()) return
     await lockPrivacySpace({ switchToAll: true })
     return
   }
   const unlocked = await requestPrivacyUnlock()
   if (!unlocked) return
+  discardMobileBackActions(['folder', 'trash', 'transfer'])
   state.privacyMode = true
   state.privacyUnlocked = true
+  state.trash = false
   state.category = 'all'
   state.query = ''
   state.page = 1
@@ -738,6 +840,7 @@ async function enterPrivacySpace() {
   updatePrivacyIndicator()
   notePrivacyActivity()
   await refresh()
+  pushMobileBackAction('privacy', () => lockPrivacySpace({ switchToAll: true }))
 }
 
 /**
@@ -747,6 +850,7 @@ async function enterPrivacySpace() {
  * 直到 boot() 判断完登录状态、调用其中某一个函数。
  */
 function showApp() {
+  resetMobileBackHistory()
   $('#auth-view').hidden = true
   $('#app-view').hidden = false
 
@@ -873,6 +977,7 @@ function bindAuth() {
     $('#password-form').reset()
     modal.hidden = false
     setTimeout(() => $('#password-form [name="oldPassword"]').focus(), 0)
+    pushMobileBackAction('password-modal', () => closePasswordDialog({ force: true }))
   })
 
   $('#password-form').addEventListener('submit', async (event) => {
@@ -891,8 +996,7 @@ function bindAuth() {
           newPassword: form.newPassword.value,
         }),
       })
-      $('#password-modal').hidden = true
-      form.reset()
+      closePasswordDialog({ force: true })
       // 修改账号密码会让服务端清除隐私 Cookie，前端同步回到锁定状态。
       if (state.privacyUnlocked) await lockPrivacySpace({ switchToAll: state.privacyMode })
       notify('密码已更新', 'ok')
@@ -2286,6 +2390,7 @@ async function navigateLightbox(direction) {
 function openLightbox(id) {
   const record = state.files.find((row) => row.id === id)
   if (!record) return
+  const wasOpen = !$('#lightbox').hidden
   pauseLightboxMedia()
   state.lightboxId = id
 
@@ -2371,11 +2476,16 @@ function openLightbox(id) {
   document.body.style.overflow = 'hidden'
   updateLightboxNavigation()
   preloadAdjacentPreviews(index)
+  if (!wasOpen) pushMobileBackAction('lightbox', () => closeLightbox({ force: true }))
 }
 
-function closeLightbox() {
+function closeLightbox({ force = false } = {}) {
+  if (!force && requestMobileBack()) return
   const box = $('#lightbox')
-  if (box.hidden) return
+  if (box.hidden) {
+    if (force) discardMobileBackActions(['lightbox'])
+    return
+  }
   // 先暂停再清空，确保音频进度定时器和播放状态一起结束
   const playingMedia = $('#lightbox-body audio, #lightbox-body video')
   if (playingMedia) playingMedia.pause()
@@ -2386,6 +2496,7 @@ function closeLightbox() {
   state.lightboxId = null
   state.lightboxNavigating = false
   document.body.style.overflow = ''
+  if (force) discardMobileBackActions(['lightbox'])
 }
 
 /** 把界面切到回收站视图，并同步侧栏的选中状态。 */
@@ -2402,9 +2513,21 @@ function enterTrashView() {
   $('#trash-btn').classList.add('is-active')
 }
 
-async function openTrashView({ silent = false } = {}) {
+async function leaveTrashView() {
+  state.trash = false
+  state.category = 'all'
+  state.page = 1
+  $('#trash-btn').classList.remove('is-active')
+  $$('#cat-list .cat-item[data-cat]').forEach((item) => {
+    item.classList.toggle('is-active', item.dataset.cat === 'all')
+  })
+  await refresh({ silent: true })
+}
+
+async function openTrashView({ silent = false, pushBack = true } = {}) {
   enterTrashView()
   await refresh({ silent })
+  if (pushBack) pushMobileBackAction('trash', () => leaveTrashView())
 }
 
 /**
@@ -2414,10 +2537,12 @@ async function openTrashView({ silent = false } = {}) {
 let renamingType = ''
 let renamingId = ''
 
-function closeRenameDialog() {
+function closeRenameDialog({ force = false } = {}) {
+  if (!force && requestMobileBack()) return
   $('#rename-modal').hidden = true
   renamingType = ''
   renamingId = ''
+  if (force) discardMobileBackActions(['rename-modal'])
 }
 
 function openRenameDialog(type, id) {
@@ -2432,6 +2557,7 @@ function openRenameDialog(type, id) {
   $('#rename-modal').hidden = false
   $('#rename-input').focus()
   $('#rename-input').select()
+  pushMobileBackAction('rename-modal', () => closeRenameDialog({ force: true }))
 }
 
 async function submitRename(event) {
@@ -2448,7 +2574,7 @@ async function submitRename(event) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name }),
     })
-    closeRenameDialog()
+    closeRenameDialog({ force: true })
     notify('名称已更新', 'ok')
     await refresh({ silent: true })
   } catch (error) {
@@ -2483,9 +2609,11 @@ function folderPathLabels(folders) {
     .sort((a, b) => a.label.localeCompare(b.label, 'zh-CN'))
 }
 
-function closeMoveDialog() {
+function closeMoveDialog({ force = false } = {}) {
+  if (!force && requestMobileBack()) return
   $('#move-modal').hidden = true
   movingItem = null
+  if (force) discardMobileBackActions(['move-modal'])
 }
 
 /** 文件夹只能放到根目录或非自身子树，避免把树移成环。 */
@@ -2529,6 +2657,7 @@ async function openMoveDialog(kind, id) {
     movingItem = { kind, id }
     $('#move-modal').hidden = false
     select.focus()
+    pushMobileBackAction('move-modal', () => closeMoveDialog({ force: true }))
   } catch (error) {
     notify(error.message)
   }
@@ -2547,7 +2676,7 @@ async function submitMove(event) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(kind === 'folder' ? { parentId: folderId } : { folderId }),
     })
-    closeMoveDialog()
+    closeMoveDialog({ force: true })
     notify(kind === 'folder' ? '文件夹已移动' : '文件已移动', 'ok')
     await refresh({ silent: true })
   } catch (error) {
@@ -2641,9 +2770,15 @@ async function createFolder() {
   }
 }
 
-/** 进入指定文件夹；null 返回根目录。 */
-async function openFolder(id) {
-  state.folderId = id || null
+/** 进入指定文件夹；null 返回根目录。返回键会按打开顺序逐级退回。 */
+async function openFolder(id, { pushBack = true } = {}) {
+  const target = id || null
+  const previous = state.folderId || null
+  if (target === previous) return
+  if (pushBack) {
+    pushMobileBackAction('folder', () => openFolder(previous, { pushBack: false }))
+  }
+  state.folderId = target
   state.page = 1
   state.query = ''
   $('#search-input').value = ''
@@ -2808,6 +2943,7 @@ function bindApp() {
   $('#cat-list').addEventListener('click', async (event) => {
     const btn = event.target.closest('[data-cat]')
     if (!btn) return
+    discardMobileBackActions(['folder', 'trash', 'privacy', 'transfer'])
     if (state.transferMode && window.VaultTransfers) window.VaultTransfers.leave()
     // 离开隐私空间即重新上锁，之后再次访问必须重新输入隐私密码。
     if (state.privacyMode) await lockPrivacySpace()
@@ -2825,6 +2961,7 @@ function bindApp() {
 
   // 回收站入口：独立视图，进去时清空搜索词，避免带着别的条件看
   $('#trash-btn').addEventListener('click', async () => {
+    discardMobileBackActions(['folder', 'privacy', 'transfer'])
     if (state.transferMode && window.VaultTransfers) window.VaultTransfers.leave()
     if (state.privacyMode) await lockPrivacySpace()
     await openTrashView()
@@ -3193,7 +3330,7 @@ function bindApp() {
 
   // 弹窗关闭
   $('#password-modal').addEventListener('click', (event) => {
-    if (event.target.closest('[data-close]')) $('#password-modal').hidden = true
+    if (event.target.closest('[data-close]')) closePasswordDialog()
   })
   $('#move-modal').addEventListener('click', (event) => {
     if (event.target.closest('[data-move-close]')) closeMoveDialog()
@@ -3275,7 +3412,7 @@ function bindApp() {
     else if (!$('#move-modal').hidden) closeMoveDialog()
     else if (!$('#rename-modal').hidden) closeRenameDialog()
     else if (!$('#lightbox').hidden) closeLightbox()
-    else if (!$('#password-modal').hidden) $('#password-modal').hidden = true
+    else if (!$('#password-modal').hidden) closePasswordDialog()
     else if (!$('#user-dropdown').hidden) $('#user-dropdown').hidden = true
   })
 
@@ -3285,6 +3422,9 @@ function bindApp() {
     const video = $('#lightbox-body video')
     if (video && window.innerWidth < 720) video.setAttribute('preload', 'metadata')
   })
+
+  // 手机系统返回键与浏览器返回键统一由分层返回栈处理。
+  window.addEventListener('popstate', () => { void handleMobileBackPopstate() })
 
   // 浏览器从前进 / 后退缓存恢复页面时也视为一次重新进入，必须再次解锁。
   window.addEventListener('pageshow', (event) => {
