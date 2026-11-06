@@ -3,7 +3,7 @@
    ══════════════════════════════════════════════════════════════════════════
 
    本文件负责三件事：
-   1. 把上传改成 8 MiB 分块会话，支持暂停、继续、取消和刷新后恢复；
+   1. 把上传改成 4 MiB 分块会话，支持暂停、继续、取消和刷新后恢复；
    2. 在支持 File System Access API 的浏览器中，用 Range 分块写入用户选择的
       本地文件，实现可暂停的下载；不支持的浏览器回退到普通下载；
    3. 维护传输页面的任务列表、进度、速度和操作按钮。
@@ -12,7 +12,7 @@
    因此上传任务刷新后需要重新选择原文件，下载任务刷新后需要重新授权写入位置。
    ══════════════════════════════════════════════════════════════════════════ */
 
-const UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024
+const UPLOAD_CHUNK_BYTES = 4 * 1024 * 1024
 const DOWNLOAD_CHUNK_BYTES = 8 * 1024 * 1024
 const MAX_PARALLEL_UPLOADS = 2
 const UPLOAD_STORE_PREFIX = 'personal-vault:uploads:'
@@ -84,6 +84,28 @@ function findTransferTask(kind, id) {
 function transferProgress(task) {
   if (!task.size) return 0
   return Math.min(100, Math.max(0, (task.loaded / task.size) * 100))
+}
+
+function formatTransferDuration(ms) {
+  const seconds = Math.max(0, Number(ms) || 0) / 1000
+  if (seconds < 10) return `${seconds.toFixed(1)} 秒`
+  const rounded = Math.round(seconds)
+  if (rounded < 60) return `${rounded} 秒`
+  const minutes = Math.floor(rounded / 60)
+  const remain = rounded % 60
+  if (minutes < 60) return `${minutes} 分 ${remain} 秒`
+  const hours = Math.floor(minutes / 60)
+  return `${hours} 小时 ${minutes % 60} 分`
+}
+
+function startTransferTimer(task) {
+  if (!task.startedAt) task.startedAt = Date.now()
+}
+
+function finishTransferTimer(task) {
+  if (!task.startedAt || task.elapsedMs) return
+  task.finishedAt = Date.now()
+  task.elapsedMs = Math.max(0, task.finishedAt - task.startedAt)
 }
 
 function transferIsActive(task) {
@@ -163,6 +185,9 @@ function transferTaskHtml(task) {
     ? `${formatSize(task.loaded)} / ${formatSize(task.size)}`
     : formatSize(task.loaded)
   const speed = task.status === 'running' && task.speed > 0 ? ` · ${formatSize(task.speed)}/s` : ''
+  const duration = ['completed', 'skipped'].includes(task.status) && task.elapsedMs
+    ? ` · 耗时 ${formatTransferDuration(task.elapsedMs)}`
+    : ''
   const statusError = ['failed', 'paused'].includes(task.status) && task.error
   const note = task.error ? `<p class="transfer-note${statusError ? ' is-error' : ''}">${escapeHtml(task.error)}</p>` : ''
   const stateClass = ['completed', 'failed', 'paused', 'skipped'].includes(task.status) ? ` is-${task.status}` : ''
@@ -177,7 +202,7 @@ function transferTaskHtml(task) {
       <div class="transfer-track"><i style="--progress:${progress.toFixed(2)}%"></i></div>
       <div class="transfer-meta">
         <span class="transfer-status${statusError ? ' is-error' : ''}">${escapeHtml(transferStatusText(task))}</span>
-        <span class="transfer-bytes">${bytes}${speed}</span>
+        <span class="transfer-bytes">${bytes}${speed}${duration}</span>
       </div>
       ${note}
     </div>
@@ -735,6 +760,7 @@ async function ensureUploadSession(task) {
 }
 
 function markUploadFinished(task) {
+  finishTransferTimer(task)
   task.status = 'completed'
   task.loaded = task.size
   task.speed = 0
@@ -798,6 +824,7 @@ async function handleUploadFailure(task, error) {
     return
   }
   if (code === 'DUPLICATE_FILE') {
+    finishTransferTimer(task)
     task.status = 'skipped'
     task.error = '账号中已存在相同内容，本次上传已跳过'
     task.retryable = false
@@ -848,6 +875,7 @@ async function syncUploadOffset(task) {
 async function runUploadTask(task) {
   const { state, refresh, notePrivacyActivity, notify } = host()
   if (!task.file || !state.user) return
+  startTransferTimer(task)
   task.status = 'running'
   task.error = ''
   task.waitingReason = ''
@@ -897,7 +925,7 @@ async function runUploadTask(task) {
           }
           continue
         }
-        if (error.code === 'UPLOAD_IN_PROGRESS' && inProgressRetries < 12) {
+        if (error.code === 'UPLOAD_IN_PROGRESS' && inProgressRetries < 20) {
           inProgressRetries += 1
           const waitMs = Math.min(5000, 500 * (2 ** (inProgressRetries - 1)))
           await new Promise((resolve) => setTimeout(resolve, waitMs))
@@ -1312,6 +1340,7 @@ async function writeFullDownload(task, response) {
 
 async function completeDownloadTask(task) {
   const { notify } = host()
+  finishTransferTimer(task)
   if (task.writable) {
     await task.writable.truncate(task.size)
     await task.writable.close()
@@ -1432,6 +1461,7 @@ async function performDownloadTask(task) {
 
 function startDownloadRun(task) {
   if (!task || task.status === 'running' || downloadRuns.has(task.id)) return
+  startTransferTimer(task)
   task.status = 'running'
   task.error = ''
   resetTransferSpeed(task)
