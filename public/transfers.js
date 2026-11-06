@@ -323,7 +323,10 @@ function updateTransferProgress(task, loaded) {
   if (task.status === 'running') {
     if (task.lastSampleAt && now - task.lastSampleAt >= 450 && next >= task.lastSampleLoaded) {
       const elapsed = (now - task.lastSampleAt) / 1000
-      if (elapsed > 0) task.speed = (next - task.lastSampleLoaded) / elapsed
+      if (elapsed > 0) {
+        const instant = (next - task.lastSampleLoaded) / elapsed
+        task.speed = task.speed > 0 ? task.speed * 0.65 + instant * 0.35 : instant
+      }
       task.lastSampleAt = now
       task.lastSampleLoaded = next
     } else if (!task.lastSampleAt) {
@@ -1297,7 +1300,7 @@ async function writeResumedChunk(task, bytes, startOffset) {
   await task.writable.write(bytes)
   task.offset = startOffset + bytes.length
   task.loaded = task.offset
-  resetTransferSpeed(task)
+  // 保留上一段的速度样本，避免 8MiB 分块切换时速度文字短暂消失。
   persistDownloadTasks()
   scheduleTransferRender()
   return true

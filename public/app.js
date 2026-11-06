@@ -287,7 +287,7 @@ function uniqueFiles(fileList) {
  *
  * 改动前端功能时记得同步这里和 package.json。
  */
-const APP_VERSION = '1.9.10'
+const APP_VERSION = '1.9.11'
 
 /**
  * 调用后端 JSON API，并把非 2xx 响应转换为异常。
@@ -2147,8 +2147,8 @@ async function deleteFile(id) {
     await api(`/api/files/${id}`, { method: 'DELETE' })
     if (state.lightboxId === id) closeLightbox()
     notify(`已移入回收站：${record.name}`, 'ok')
-    // 删除后直接展示回收站，用户可以立刻确认文件确实在里面，也能马上恢复
-    await openTrashView({ silent: true })
+    // 保持当前分类和页码，只刷新列表；用户需要时可自行进入回收站。
+    await refresh({ silent: true })
   } catch (error) {
     notify(error.message)
   }
