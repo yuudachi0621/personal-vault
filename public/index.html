@@ -281,6 +281,7 @@
             <span class="pill" id="view-count">0 项</span>
           </div>
           <div class="toolbar-tools">
+            <button class="btn btn-ghost btn-sm" type="button" id="new-folder-btn">新建文件夹</button>
             <label class="select">
               <span>排序</span>
               <select id="sort-select">
@@ -290,8 +291,20 @@
                 <option value="largest">体积从大到小</option>
               </select>
             </label>
+            <!-- 视图模式是前端状态，选择会由 app.js 写入 localStorage。 -->
+            <div class="view-switch" role="group" aria-label="视图方式">
+              <button type="button" data-view-mode="grid" title="网格视图" aria-label="网格视图">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><rect x="14" y="14" width="6" height="6" rx="1"/></svg>
+              </button>
+              <button type="button" data-view-mode="list" title="列表视图" aria-label="列表视图">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M9 6h11M9 12h11M9 18h11"/><circle cx="5" cy="6" r="1"/><circle cx="5" cy="12" r="1"/><circle cx="5" cy="18" r="1"/></svg>
+              </button>
+            </div>
           </div>
         </div>
+
+        <!-- 普通文件夹路径；面包屑同时可作为拖拽移动的放置目标。 -->
+        <nav id="folder-breadcrumb" class="folder-breadcrumb" aria-label="文件夹路径" hidden></nav>
 
         <section id="transfer-panel" class="transfer-panel" hidden>
           <div class="transfer-head">
@@ -460,6 +473,55 @@
     </div>
   </div>
 
+  <!-- ══════════════════════════ 重命名 ══════════════════════════ -->
+  <div id="rename-modal" class="modal" hidden>
+    <div class="modal-backdrop" data-rename-close></div>
+    <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="rename-title">
+      <header class="modal-head">
+        <h3 id="rename-title">重命名</h3>
+        <button class="icon-btn" data-rename-close type="button" aria-label="关闭">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <path d="M6 6l12 12M18 6 6 18" />
+          </svg>
+        </button>
+      </header>
+      <form id="rename-form" class="modal-body">
+        <label class="field">
+          <span>新名称</span>
+          <input id="rename-input" type="text" maxlength="180" required autocomplete="off">
+        </label>
+        <div class="modal-actions">
+          <button class="btn btn-ghost" type="button" data-rename-close>取消</button>
+          <button class="btn btn-primary" type="submit">保存</button>
+        </div>
+      </form>
+    </div>
+  </div>
+  <!-- ══════════════════════════ 移动到文件夹 ══════════════════════════ -->
+  <div id="move-modal" class="modal" hidden>
+    <div class="modal-backdrop" data-move-close></div>
+    <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="move-title">
+      <header class="modal-head">
+        <h3 id="move-title">移动到文件夹</h3>
+        <button class="icon-btn" data-move-close type="button" aria-label="关闭">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <path d="M6 6l12 12M18 6 6 18" />
+          </svg>
+        </button>
+      </header>
+      <form id="move-form" class="modal-body">
+        <p class="move-file-name" id="move-file-name"></p>
+        <label class="field">
+          <span>目标文件夹</span>
+          <select id="move-folder-select" name="folderId"></select>
+        </label>
+        <div class="modal-actions">
+          <button class="btn btn-ghost" type="button" data-move-close>取消</button>
+          <button class="btn btn-primary" type="submit">移动</button>
+        </div>
+      </form>
+    </div>
+  </div>
   <!-- ══════════════════════════ 隐私空间解锁 / 设置 ══════════════════════════ -->
   <div id="privacy-modal" class="modal" hidden>
     <div class="modal-backdrop" data-close></div>
@@ -501,6 +563,7 @@
   </div>
 
   <div id="toasts" class="toasts" aria-live="polite"></div>
+  <div id="card-menu" class="card-menu" role="menu" hidden></div>
 
   <script src="/config.js"></script>
   <script src="/app.js"></script>

@@ -30,7 +30,7 @@
 | 注册控制 | 通过 `config.json` 的 `registrationCode` 决定必须填写注册码还是开放注册 |
 | 文件分类 | 服务端根据扩展名 / MIME 自动归入照片、视频、音乐、文件；SVG 按普通文件处理 |
 | 上传 | 选择或拖拽、多选、4MiB 分块续传、暂停 / 继续 / 取消、SHA-256 内容去重 |
-| 文件列表 | 分类、文件名搜索、四种排序、每页 30 条的页码分页 |
+| 文件列表 | 分类、文件名搜索、四种排序、每页 30 条的页码分页、普通空间文件夹、网格 / 列表视图切换 |
 | 预览 | 图片缩放 / 平移 / 相邻预加载、自定义音频播放器、视频 720P / 原画切换 |
 | 媒体封面 | FFmpeg 生成并缓存照片 / 视频小尺寸 JPEG；失败时回退原图或视频取帧 |
 | 视频流 | HTTP Range、206 分段响应、ETag、慢速缓冲状态与有限次数自动重连 |
@@ -83,6 +83,21 @@
 - 上传和下载任务都只记录传输元数据，不记录文件内容；服务端临时文件仍需遵守磁盘空间和用户配额限制。
 - 隐私传输任务在隐私空间锁定时会自动暂停并隐藏，重新解锁后才恢复显示。
 
+### 文件夹
+
+- 普通空间支持多级文件夹、面包屑导航和新建文件夹。
+- 当前目录上传的文件会直接归入该文件夹；现有文件可通过“移动到文件夹”菜单或拖拽移动，文件夹也可拖到文件夹卡片 / 面包屑，或使用“移动到文件夹”菜单。
+- 文件和文件夹可通过卡片操作重命名；卡片保留“下载/恢复”和一个“更多”按钮，其余操作收入统一菜单。
+- 工具栏可在网格视图与列表视图之间切换，选择会保存在当前浏览器中；列表模式把操作按钮固定在行右侧，不再覆盖缩略图。
+- 拖拽移动使用独立的自定义拖拽类型，和桌面文件拖入上传严格区分，避免拖动缩略图时重复上传。
+- 左侧照片、视频、音乐、文件分类会递归统计并列出所有文件夹中的对应文件。
+- 文件夹 ZIP 下载会进入传输中心，显示下载进度、速度和耗时；该 ZIP 下载不支持断点续传。
+- 文件夹可下载为 ZIP，ZIP 内保留原文件夹层级和文件名。单次 ZIP 受 ZIP32 的 4GB / 65535 条目限制。
+- 删除文件夹会递归把子文件夹和文件移入回收站；恢复时整棵树一起恢复。
+- 回收站中只显示被删除文件夹的顶层入口，避免重复列出内部文件。
+- 文件夹彻底删除和 24 小时自动清理都会先删磁盘文件，再删数据库记录。
+- 隐私文件不允许放入普通文件夹；移入隐私空间时会自动从文件夹移出。
+
 ## 回收站
 
 - 普通文件删除时只写 `deleted_at`，不会立即删除磁盘文件。
@@ -113,9 +128,12 @@
                   ├─ lib/api/auth.js       注册、登录、改密
                   ├─ lib/api/privacy.js    隐私空间
                   ├─ lib/api/uploads.js    分块/兼容上传
-                  ├─ lib/api/files.js      文件与回收站
+                  ├─ lib/api/files.js      文件列表、文件更新与回收站
+                  ├─ lib/api/folders.js    文件夹、移动、恢复与 ZIP 下载
                   ├─ lib/api/core.js       会话、限流、映射、文件工具
-                  ├─ lib/store.js          参数化 SQL
+                  ├─ lib/store.js          文件 / 用户参数化 SQL
+                  ├─ lib/folder-store.js   文件夹树与递归回收站 SQL
+                  ├─ lib/zip-stream.js     文件夹流式 ZIP 打包
                   ├─ lib/db.js             SQLite、schema、迁移
                   └─ lib/migrations.js     编号式迁移事务
 ```
@@ -124,10 +142,11 @@
 
 - `server.js` 是组合根：显式初始化配置、数据库、日志、HTTP 服务和优雅退出。
 - `lib/api.js` 只负责来源校验、限流、公开路由、登录闸门、路由匹配和错误映射。
-- 业务处理器按认证、隐私、上传、文件/回收站分模块；
-- `lib/store.js` 封装全部业务 SQL，文件查询按 `owner_id` 隔离。
+- 业务处理器按认证、隐私、上传、文件、文件夹和回收站分模块。
+- `lib/store.js` 封装文件与用户 SQL，`lib/folder-store.js` 封装文件夹树 SQL；所有文件、文件夹查询都按 `owner_id` 隔离。
 - `lib/file-stream.js` 负责 Range、HEAD、下载和媒体流。
 - `lib/upload-finalizer.js` 统一分块上传和兼容上传的去重、配额和记录构造。
+- `lib/folder-store.js` 管理文件夹树、递归删除/恢复；`lib/zip-stream.js` 负责流式 ZIP 下载。
 - 普通登录 Cookie 与隐私 Cookie 分离；隐私文件需要同时通过两层校验。
 - 原文件只读；预览与缩略图是独立缓存，删除原文件时同步清理。
 
@@ -147,12 +166,15 @@
 │  │  ├─ auth.js               认证处理器
 │  │  ├─ privacy.js            隐私空间处理器
 │  │  ├─ uploads.js            上传处理器
-│  │  └─ files.js              文件与回收站处理器
+│  │  ├─ files.js              文件列表、更新、回收站与文件夹列表响应
+│  │  └─ folders.js            文件夹创建、重命名、移动、恢复与 ZIP 下载
 │  ├─ auth.js                  scrypt、HMAC、Cookie
 │  ├─ config.js                部署、CORS、容量、PUBLIC_ORIGIN
 │  ├─ db.js                    SQLite 初始化与 schema 基线
 │  ├─ migrations.js            编号式迁移和 schema_migrations
 │  ├─ store.js                 参数化 SQL 仓储
+│  ├─ folder-store.js          文件夹树、移动约束、面包屑与递归回收站
+│  ├─ zip-stream.js            文件夹流式 ZIP 打包
 │  ├─ upload-session.js        分块会话和临时文件
 │  ├─ upload-finalizer.js      共享上传最终提交规则
 │  ├─ file-stream.js           Range/HEAD/文件流
@@ -534,7 +556,13 @@ API 默认返回 JSON，错误格式为：
 | POST | `/api/auth/logout` | 退出并清除普通 / 隐私 Cookie |
 | GET | `/api/auth/me` | 当前用户 |
 | PATCH | `/api/auth/password` | 修改账号密码，撤销旧会话 |
-| GET | `/api/files` | 普通文件列表：`category` / `q` / `sort` / `limit` / `offset` |
+| GET | `/api/files` | 普通空间文件列表：`category` / `q` / `sort` / `limit` / `offset` / `folderId`；分类视图会跨目录递归 |
+| GET | `/api/folders` | 当前用户全部正常文件夹，供移动弹窗构建完整路径 |
+| POST | `/api/folders` | 创建文件夹，参数 `name`、`parentId` |
+| PATCH / DELETE | `/api/folders/:id` | 重命名、移动（`parentId`）或递归移入回收站 |
+| GET | `/api/folders/:id/download` | 流式下载文件夹 ZIP |
+| POST | `/api/folders/:id/restore` | 递归恢复文件夹 |
+| DELETE | `/api/trash/folders/:id` | 彻底删除回收站中的文件夹 |
 | POST | `/api/files/upload?name=...` | 兼容接口：一次性流式上传；隐私视图附加 `private=1` |
 | POST | `/api/uploads` | 创建可续传上传会话，返回会话 ID、偏移量和分块大小 |
 | GET / HEAD | `/api/uploads/:id` | 查询上传会话的当前偏移量和过期时间 |
@@ -544,7 +572,7 @@ API 默认返回 JSON，错误格式为：
 | GET / HEAD | `/api/files/:id/download` | 附件下载，支持 Range |
 | GET / HEAD | `/api/files/:id/preview` | 720P 副本；不存在时回退原文件 |
 | GET / HEAD | `/api/files/:id/thumbnail` | 照片 / 视频封面 JPEG；首次按需生成并缓存 |
-| PATCH | `/api/files/:id` | 普通文件改名 / 改分类 |
+| PATCH | `/api/files/:id` | 普通文件改名 / 改分类 / 移动到文件夹（`folderId`） |
 | DELETE | `/api/files/:id` | 普通文件移入回收站 |
 | POST | `/api/files/:id/restore` | 从回收站恢复 |
 | GET | `/api/trash` | 回收站列表 |
@@ -560,14 +588,19 @@ API 默认返回 JSON，错误格式为：
 | POST | `/api/privacy/files/:id/move-out` | 移出隐私空间 |
 | DELETE | `/api/privacy/files/:id` | 永久删除隐私文件 |
 
-列表响应结构：
+`GET /api/files` 主要响应字段（前端实际请求 `limit=30`）：
 
 ```json
 {
   "files": [],
+  "folders": [
+    { "id": "folder-id", "name": "资料", "parentId": null }
+  ],
+  "folder": null,
+  "breadcrumbs": [],
   "usage": {},
   "page": {
-    "limit": 60,
+    "limit": 30,
     "offset": 0,
     "total": 0,
     "hasMore": false
@@ -575,7 +608,7 @@ API 默认返回 JSON，错误格式为：
 }
 ```
 
-`limit` 上限为 200，默认 60。
+`limit` 上限为 200。省略时 API 默认 60；网页文件列表显式按每页 30 条分页。分类视图会忽略 `folderId`，递归返回该分类下的文件。
 
 ## 安全设计与限制
 
@@ -585,7 +618,7 @@ API 默认返回 JSON，错误格式为：
 - 会话使用 HMAC-SHA256 签名 HttpOnly Cookie，有效期 30 天；新会话同时在 SQLite sessions 表中登记。
 - 令牌包含会话版本和会话 ID；退出登录会删除当前会话，修改账号密码会撤销其它旧登录令牌。升级前签发且不含会话 ID 的旧令牌在到期前仍保持兼容。
 - 隐私令牌额外包含 `scope`、隐私密码版本和会话版本。
-- 所有文件 SQL 查询按 `owner_id` 过滤；他人文件按 404 处理。
+- 所有文件和文件夹 SQL 查询按 `owner_id` 过滤；他人资源按 404 处理。
 - 文件名不直接用于磁盘路径；磁盘名使用随机 UUID + 安全扩展名。
 - HTML / SVG / XML / PDF 等主动内容不会安全内联，统一按附件下载。
 - 静态文件防目录穿越；HTML 设置 CSP；全站设置 `nosniff`、`SAMEORIGIN`、Permissions-Policy。
@@ -738,13 +771,13 @@ server {
 
 ## 测试与验证
 
-当前仓库使用 Node 内置 `node:test`，运行 `npm test` 会自动发现 `tests/*.test.js`；当前共有 60 项后端与边界测试。测试使用内存 SQLite、流对象和系统临时目录，不读取真实 `data/`。仓库仍未配置 ESLint / Prettier；以下命令可作为额外的静态验证。
+当前仓库使用 Node 内置 `node:test`，运行 `npm test` 会自动发现 `tests/*.test.js`；当前共有 62 项后端与边界测试。测试使用系统临时目录中的独立 SQLite 文件、流对象和临时文件，不读取真实 `data/`。仓库仍未配置 ESLint / Prettier；以下命令可作为额外的静态验证。
 
 ### PowerShell
 
 ```powershell
 node --check server.js
-Get-ChildItem lib -Filter *.js | ForEach-Object { node --check $_.FullName }
+Get-ChildItem lib -Recurse -Filter *.js | ForEach-Object { node --check $_.FullName }
 node --check public/app.js
 node --check public/transfers.js
 node --check scripts/optimize-video-previews.mjs
@@ -755,7 +788,7 @@ git diff --check
 
 ```bash
 node --check server.js
-for file in lib/*.js; do node --check "$file" || exit 1; done
+find lib -name '*.js' -print0 | while IFS= read -r -d '' file; do node --check "$file" || exit 1; done
 node --check public/app.js
 node --check public/transfers.js
 node --check scripts/optimize-video-previews.mjs
@@ -767,16 +800,17 @@ git diff --check
 1. 首次启动生成 `config.json` 和 `data/`。
 2. 注册、退出、重新登录。
 3. 上传照片、视频、音乐、普通文件并确认分类。
-4. 测试搜索、排序、分页、重命名和下载。
-5. 上传大于 16MiB 的文件，在首个分块后暂停，确认继续后下载内容的 SHA-256 与原文件一致。
-6. 刷新页面后重新选择原文件，确认上传从服务端已有偏移继续；取消任务后确认临时会话消失。
-7. 在支持 File System Access API 的浏览器下载大文件，暂停、继续并校验目标文件 SHA-256；再验证不支持该 API 时的普通下载回退。
-8. 普通文件删除到回收站、恢复、彻底删除。
-9. 大照片与视频封面缓存、图片缩放 / 平移、音频播放、视频拖动和清晰度切换。
-10. 设置隐私密码、移入 / 移出隐私文件，确认普通列表不可见。
-11. 刷新页面后确认隐私空间重新锁定。
-12. 修改账号密码后确认旧隐私解锁失效。
-13. 验证 FFmpeg 可用和不可用两种视频播放路径。
+4. 测试搜索、排序、分页、重命名、网格 / 列表视图切换和下载；列表模式下确认操作按钮位于行右侧且不覆盖缩略图。
+5. 将文件与文件夹拖到文件夹卡片和面包屑，确认移动成功；再验证“移动到文件夹”菜单、拖入自身 / 子目录以及同名目录冲突的处理。
+6. 上传大于 16MiB 的文件，在首个分块后暂停，确认继续后下载内容的 SHA-256 与原文件一致。
+7. 刷新页面后重新选择原文件，确认上传从服务端已有偏移继续；取消任务后确认临时会话消失。
+8. 在支持 File System Access API 的浏览器下载大文件，暂停、继续并校验目标文件 SHA-256；再验证不支持该 API 时的普通下载回退。
+9. 普通文件删除到回收站、恢复、彻底删除。
+10. 大照片与视频封面缓存、图片缩放 / 平移、音频播放、视频拖动和清晰度切换。
+11. 设置隐私密码、移入 / 移出隐私文件，确认普通列表不可见。
+12. 刷新页面后确认隐私空间重新锁定。
+13. 修改账号密码后确认旧隐私解锁失效。
+14. 验证 FFmpeg 可用和不可用两种视频播放路径。
 
 ## 已知边界与待确认事项
 
@@ -785,12 +819,13 @@ git diff --check
 - 跨域部署需要静态托管平台额外配置 CSP 和 CORS；仓库只提供后端侧 CORS。
 - `node:sqlite` 的实验性 API 兼容性需要随 Node 版本升级持续确认。
 - 账号密码没有网页端找回流程；隐私密码只能在仍记得账号密码时重置。
-- 没有文件病毒扫描、内容审核、版本历史、文件夹层级或分享链接。
+- 没有文件病毒扫描、内容审核、版本历史或分享链接。
 - 单进程限流不适用于多实例部署。
 - 页面内断点续传下载依赖 File System Access API；Firefox / Safari 等回退路径无法显示浏览器自身的实时下载进度。
 - 页面刷新后上传任务必须重新选择原文件，下载任务能否无提示继续取决于浏览器对已保存文件句柄权限的策略。
 - 旧版不含 `sid` 的会话令牌在自然过期前仍保持兼容，退出登录不能立即撤销这类令牌。
 - 隐私空间是应用层访问控制，不是磁盘加密；数据库和上传文件默认明文存储。
+- 拖拽移动依赖桌面浏览器的 HTML5 Drag and Drop；触屏或禁用该能力的环境应使用卡片“更多”菜单中的“移动到文件夹”，触摸拖拽本身未单独实现。
 - 当前没有自动备份恢复脚本、迁移 checksum、启动时孤儿文件对账和浏览器端安全 E2E 测试。
 - FFmpeg 版本和 Node 运行时补丁版本需要在部署侧固定并纳入发布检查。
 

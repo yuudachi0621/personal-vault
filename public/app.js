@@ -37,9 +37,9 @@
         文件最后的 boot() 就是给各个按钮挂上监听器的过程。
 
    【整体结构】按下面的分节标题顺序阅读即可
-     通用工具 → Toast 提示 → 视图切换 / 隐私解锁 → 认证 → 列表渲染
+     通用工具 → Toast 提示 → 拖拽状态 / 隐私解锁 → 认证 → 文件夹与列表渲染
      → 数据加载 → 上传 → 图片缩放 → 音乐播放器 → 视频与灯箱
-     → 文件操作 → 事件绑定 → 启动
+     → 文件与文件夹操作 → 事件绑定 → 启动
    ══════════════════════════════════════════════════════════════════════════ */
 
 /**
@@ -103,6 +103,10 @@ function applySiteFooter() {
 const state = {
   user: null,        // 当前登录用户，null 表示没登录
   files: [],         // 当前「已加载」的文件（可能只是第一页）
+  folders: [],       // 当前目录下的文件夹
+  folderId: null,    // 当前所在文件夹；null 表示根目录
+  currentFolder: null, // 当前文件夹对象；null 表示根目录
+  breadcrumbs: [],   // 根目录到当前文件夹的路径
   usage: null,       // 当前视图的用量统计；隐私视图使用独立统计
   category: 'all',   // 当前选中的分类
   query: '',         // 搜索关键词
@@ -121,6 +125,7 @@ const state = {
   privacyMode: false,
   privacyUnlocked: false,
   transferMode: false, // 是否正在查看独立的传输任务页面
+  viewMode: 'grid',   // 文件视图：grid 网格 / list 列表
 }
 
 /**
@@ -162,6 +167,7 @@ window.VaultTransferHost = {
 const PAGE_SIZE = 30
 let listRequestVersion = 0
 const VIDEO_QUALITY_KEY = 'personal-vault:video-quality'
+const VIEW_MODE_KEY = 'personal-vault:view-mode'
 const PRIVACY_IDLE_MS = 10 * 60 * 1000
 const PRIVACY_HEARTBEAT_MS = 4 * 60 * 1000
 let privacyIdleTimer = 0
@@ -173,6 +179,8 @@ let privacyReloadLockPromise = null
 try {
   const savedQuality = localStorage.getItem(VIDEO_QUALITY_KEY)
   if (['720p', 'original'].includes(savedQuality)) state.videoQuality = savedQuality
+  const savedViewMode = localStorage.getItem(VIEW_MODE_KEY)
+  if (['grid', 'list'].includes(savedViewMode)) state.viewMode = savedViewMode
 } catch { /* 隐私模式可能禁用 localStorage */ }
 
 /* ───────────────────────────── 通用工具 ───────────────────────────── */
@@ -221,12 +229,14 @@ function extOf(name) {
  * @returns {Promise<object>} 后端返回的 JSON 数据
  */
 /**
- * 页面内部是否正在拖拽。
+ * 页面内部卡片拖拽状态。
  *
- * 只看 dataTransfer.types 并不够：浏览器把页面里的图片拖起来时也可能只暴露
- * 'Files'，和从桌面拖入文件无法区分，这正是「拖一下图片就多传一份」的来源。
- * 因此从 dragstart 开始明确标记来源，直到 dragend / drop 才解除。
+ * 卡片拖拽用于移动文件 / 文件夹，而桌面文件拖入用于上传。部分浏览器会把页面内
+ * 图片拖拽也暴露成 'Files'，仅凭 dataTransfer.types 无法可靠区分；因此卡片拖拽
+ * 会额外携带 CARD_DRAG_MIME 并设置 internalDragActive，直到 dragend / drop 才解除。
+ * 这两层标记共同避免拖动缩略图时误触发一次重复上传。
  */
+const CARD_DRAG_MIME = 'application/x-personal-vault-item'
 let internalDragActive = false
 let internalDragResetTimer = 0
 
@@ -409,6 +419,10 @@ function showAuth() {
   state.user = null
   state.transferMode = false
   state.files = []
+  state.folders = []
+  state.folderId = null
+  state.currentFolder = null
+  state.breadcrumbs = []
   clearPreviewPreloads()
   // 分页状态也要重置，否则换账号登录后会接着上一个人的「已加载数量」往下取
   state.total = 0
@@ -645,6 +659,9 @@ async function lockPrivacySpace({ switchToAll = false, silent = true, skipHeartb
     state.category = 'all'
     state.query = ''
     state.page = 1
+    state.folderId = null
+    state.currentFolder = null
+    state.breadcrumbs = []
     $('#search-input').value = ''
     $('#privacy-btn').classList.remove('is-active')
     $('#trash-btn').classList.remove('is-active')
@@ -681,6 +698,9 @@ async function enterPrivacySpace() {
   state.category = 'all'
   state.query = ''
   state.page = 1
+  state.folderId = null
+  state.currentFolder = null
+  state.breadcrumbs = []
   $('#search-input').value = ''
   $$('#cat-list .cat-item').forEach((item) => item.classList.remove('is-active'))
   $('#trash-btn').classList.remove('is-active')
@@ -941,6 +961,13 @@ function setupMediaThumbnails(root = document) {
   })
 }
 
+/**
+ * 渲染文件卡片。
+ *
+ * 操作按钮必须与 .card-thumb 同级：网格模式仍绝对定位到缩略图右上角，
+ * 列表模式则由整张卡片作为定位容器，把按钮放到行最右侧。若继续放在
+ * .card-thumb 内，会被缩略图的 overflow:hidden 限制在左侧小区域内。
+ */
 function cardHtml(record) {
   const raw = apiUrl(`/api/files/${record.id}/raw`)
   const inTrash = Boolean(record.deletedAt)
@@ -968,39 +995,22 @@ function cardHtml(record) {
       ? `<span class="card-badge is-private" data-cat="private"><i></i>隐私</span>`
       : `<span class="card-badge" data-cat="${record.category}"><i></i>${CATEGORY_LABEL[record.category]}</span>`
 
-  const actions = inTrash
-    ? `<button type="button" title="恢复" aria-label="恢复" data-restore data-no-open>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 10a8 8 0 1 1 2.3 7"/><path d="M4 5v5h5"/></svg>
-        </button>
-        <button type="button" title="彻底删除" aria-label="彻底删除" data-purge data-no-open>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 7h14M9.5 7V5.5A1.5 1.5 0 0 1 11 4h2a1.5 1.5 0 0 1 1.5 1.5V7"/><path d="M6.5 7l.8 11a1.6 1.6 0 0 0 1.6 1.5h6.2a1.6 1.6 0 0 0 1.6-1.5l.8-11"/></svg>
-        </button>`
-    : inPrivacy
-      ? `<a href="${apiUrl(`/api/files/${record.id}/download`)}" title="下载" aria-label="下载" data-download="${record.id}" data-no-open>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11m0 0-4-4m4 4 4-4"/><path d="M5 19h14"/></svg>
-        </a>
-        <button type="button" title="移出隐私空间" aria-label="移出隐私空间" data-unprivate data-no-open>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4.5" y="10" width="15" height="10" rx="2"/><path d="M8 10V7.5a4 4 0 0 1 7.2-2.4"/></svg>
-        </button>
-        <button type="button" title="彻底删除" aria-label="彻底删除" data-private-delete data-no-open>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 7h14M9.5 7V5.5A1.5 1.5 0 0 1 11 4h2a1.5 1.5 0 0 1 1.5 1.5V7"/><path d="M6.5 7l.8 11a1.6 1.6 0 0 0 1.6 1.5h6.2a1.6 1.6 0 0 0 1.6-1.5l.8-11"/></svg>
-        </button>`
-      : `<a href="${apiUrl(`/api/files/${record.id}/download`)}" title="下载" aria-label="下载" data-download="${record.id}" data-no-open>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11m0 0-4-4m4 4 4-4"/><path d="M5 19h14"/></svg>
-        </a>
-        <button type="button" title="移入隐私空间" aria-label="移入隐私空间" data-private data-no-open>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4.5" y="10" width="15" height="10" rx="2"/><path d="M8 10V7.5a4 4 0 0 1 8 0V10"/></svg>
-        </button>
-        <button type="button" title="删除" aria-label="删除" data-delete data-no-open>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 7h14M9.5 7V5.5A1.5 1.5 0 0 1 11 4h2a1.5 1.5 0 0 1 1.5 1.5V7"/><path d="M6.5 7l.8 11a1.6 1.6 0 0 0 1.6 1.5h6.2a1.6 1.6 0 0 0 1.6-1.5l.8-11"/></svg>
-        </button>`
-
-  return `<article class="card${inTrash ? ' is-in-trash' : ''}${inPrivacy ? ' is-private' : ''}" data-id="${record.id}" tabindex="0">
+  const downloadAction = `<a href="${apiUrl(`/api/files/${record.id}/download`)}" title="下载" aria-label="下载" data-download="${record.id}" data-no-open>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11m0 0-4-4m4 4 4-4"/><path d="M5 19h14"/></svg>
+    </a>`
+  const restoreAction = `<button type="button" title="恢复" aria-label="恢复" data-restore data-no-open>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 10a8 8 0 1 1 2.3 7"/><path d="M4 5v5h5"/></svg>
+    </button>`
+  const moreAction = `<button type="button" title="更多操作" aria-label="更多操作" data-more data-no-open aria-haspopup="menu">
+      <svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>
+    </button>`
+  const actions = inTrash ? `${restoreAction}${moreAction}` : `${downloadAction}${moreAction}`
+  return `<article class="card${inTrash ? ' is-in-trash' : ''}${inPrivacy ? ' is-private' : ''}" data-id="${record.id}" data-drag-kind="file" draggable="${!inTrash && !inPrivacy}" tabindex="0">
     <div class="card-thumb" data-open>
       ${badge}
-      <div class="card-actions">${actions}</div>
       ${thumb}
     </div>
+    <div class="card-actions">${actions}</div>
     <div class="card-body">
       <div class="card-name" title="${escapeHtml(record.name)}">${escapeHtml(record.name)}</div>
       <div class="card-meta">${formatSize(record.size)} · ${formatDate(record.createdAt)}</div>
@@ -1008,6 +1018,148 @@ function cardHtml(record) {
   </article>`
 }
 
+/** 渲染文件夹卡片；操作区与缩略图同级的原因同 cardHtml()。 */
+function folderCardHtml(folder) {
+  const inTrash = Boolean(folder.deletedAt)
+  const badge = inTrash
+    ? `<span class="card-badge is-trash" data-cat="trash"><i></i>${escapeHtml(trashRemainText(folder))}</span>`
+    : '<span class="card-badge" data-cat="folder"><i></i>文件夹</span>'
+  const downloadAction = `<a href="${apiUrl(`/api/folders/${folder.id}/download`)}" download title="下载文件夹" aria-label="下载文件夹" data-folder-download data-no-open>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11m0 0-4-4m4 4 4-4"/><path d="M5 19h14"/></svg>
+    </a>`
+  const restoreAction = `<button type="button" title="恢复文件夹" aria-label="恢复文件夹" data-folder-restore data-no-open>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 10a8 8 0 1 1 2.3 7"/><path d="M4 5v5h5"/></svg>
+    </button>`
+  const moreAction = `<button type="button" title="更多操作" aria-label="更多操作" data-more data-no-open aria-haspopup="menu">
+      <svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>
+    </button>`
+  const actions = inTrash ? `${restoreAction}${moreAction}` : `${downloadAction}${moreAction}`
+  return `<article class="card folder-card${inTrash ? ' is-in-trash' : ''}" data-folder-id="${folder.id}" data-drag-kind="folder" draggable="${!inTrash}"${inTrash ? '' : ' data-folder-open'} tabindex="${inTrash ? '-1' : '0'}">
+    <div class="card-thumb">
+      ${badge}
+      <div class="folder-glyph" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M3.5 6.8A1.8 1.8 0 0 1 5.3 5h4.2l1.8 2h7.4a1.8 1.8 0 0 1 1.8 1.8v8.4a1.8 1.8 0 0 1-1.8 1.8H5.3a1.8 1.8 0 0 1-1.8-1.8V6.8Z"/></svg>
+      </div>
+    </div>
+    <div class="card-actions">${actions}</div>
+    <div class="card-body">
+      <div class="card-name" title="${escapeHtml(folder.name)}">${escapeHtml(folder.name)}</div>
+      <div class="card-meta">文件夹 · ${formatDate(folder.createdAt)}</div>
+    </div>
+  </article>`
+}
+
+function closeCardMenu() {
+  const menu = $('#card-menu')
+  if (menu) menu.hidden = true
+}
+
+function openCardMenu(anchor, kind, id) {
+  const menu = $('#card-menu')
+  const record = kind === 'file'
+    ? state.files.find((file) => file.id === id)
+    : state.folders.find((folder) => folder.id === id)
+  if (!menu || !record || !anchor) return
+
+  let items
+  if (kind === 'folder') {
+    items = record.deletedAt
+      ? [{ action: 'folder-purge', label: '彻底删除', danger: true }]
+      : [
+          { action: 'folder-rename', label: '重命名' },
+          { action: 'folder-move', label: '移动到文件夹' },
+          { action: 'folder-delete', label: '删除', danger: true },
+        ]
+  } else if (record.deletedAt) {
+    items = [{ action: 'purge', label: '彻底删除', danger: true }]
+  } else if (record.isPrivate) {
+    items = [
+      { action: 'unprivate', label: '移出隐私空间' },
+      { action: 'private-delete', label: '彻底删除', danger: true },
+    ]
+  } else {
+    items = [
+      { action: 'rename', label: '重命名' },
+      { action: 'move', label: '移动到文件夹' },
+      { action: 'private', label: '移入隐私空间' },
+      { action: 'delete', label: '删除', danger: true },
+    ]
+  }
+
+  menu.dataset.kind = kind
+  menu.dataset.id = id
+  menu.innerHTML = items.map((item) => (
+    `<button type="button" role="menuitem" data-card-menu-action="${item.action}" class="${item.danger ? 'is-danger' : ''}">${item.label}</button>`
+  )).join('')
+  menu.hidden = false
+
+  const rect = anchor.getBoundingClientRect()
+  const width = menu.offsetWidth || 184
+  const height = menu.offsetHeight || 160
+  let left = Math.min(window.innerWidth - width - 10, Math.max(10, rect.right - width))
+  let top = rect.bottom + 6
+  if (top + height > window.innerHeight - 10) top = Math.max(10, rect.top - height - 6)
+  menu.style.left = `${left}px`
+  menu.style.top = `${top}px`
+}
+
+function runCardMenuAction(action) {
+  const menu = $('#card-menu')
+  const kind = menu && menu.dataset.kind
+  const id = menu && menu.dataset.id
+  closeCardMenu()
+  if (!kind || !id) return
+  if (kind === 'folder') {
+    if (action === 'folder-rename') openRenameDialog('folder', id)
+    else if (action === 'folder-move') void openMoveDialog('folder', id)
+    else if (action === 'folder-delete') void deleteFolder(id)
+    else if (action === 'folder-purge') void purgeFolder(id)
+    return
+  }
+  if (action === 'rename') openRenameDialog('file', id)
+  else if (action === 'move') void openMoveDialog('file', id)
+  else if (action === 'private') void moveToPrivacy(id)
+  else if (action === 'unprivate') void moveOutOfPrivacy(id)
+  else if (action === 'delete') void deleteFile(id)
+  else if (action === 'private-delete') void deletePrivateFile(id)
+  else if (action === 'purge') void purgeFile(id)
+}
+/** 只在普通文件夹视图显示路径；每个面包屑同时可作为拖拽移动的放置目标。 */
+function renderFolderBreadcrumb() {
+  const nav = $('#folder-breadcrumb')
+  const visible = !state.transferMode && !state.trash && !state.privacyMode && Boolean(state.folderId)
+  nav.hidden = !visible
+  if (!visible) return
+  const items = [
+    '<button type="button" class="folder-crumb" data-folder-crumb="root">全部</button>',
+    ...state.breadcrumbs.map((folder, index) => {
+      const current = index === state.breadcrumbs.length - 1
+      return `${index > 0 ? '<span class="folder-crumb-sep">/</span>' : '<span class="folder-crumb-sep">/</span>'}
+        <button type="button" class="folder-crumb${current ? ' is-current' : ''}" data-folder-crumb="${folder.id}">${escapeHtml(folder.name)}</button>`
+    }),
+  ]
+  nav.innerHTML = items.join('')
+}
+/** 把当前视图模式同步到文件网格和两个切换按钮；按钮状态同时暴露给辅助技术。 */
+function applyViewMode() {
+  const grid = $('#file-grid')
+  if (!grid) return
+  const list = state.viewMode === 'list'
+  grid.classList.toggle('is-list', list)
+  $$('[data-view-mode]').forEach((button) => {
+    const active = button.dataset.viewMode === state.viewMode
+    button.classList.toggle('is-active', active)
+    button.setAttribute('aria-pressed', active ? 'true' : 'false')
+  })
+}
+
+/** 切换网格 / 列表视图；写入 localStorage 后刷新页面仍保持用户选择。 */
+function setViewMode(mode) {
+  if (!['grid', 'list'].includes(mode)) return
+  state.viewMode = mode
+  try { localStorage.setItem(VIEW_MODE_KEY, mode) } catch { /* localStorage 可能不可用 */ }
+  applyViewMode()
+}
 function renderGrid() {
   const grid = $('#file-grid')
   const empty = $('#empty-state')
@@ -1022,14 +1174,22 @@ function renderGrid() {
 
   // 传输页可能把网格隐藏过；回到文件列表时必须恢复，否则数据已加载却不可见。
   grid.hidden = false
+  applyViewMode()
 
   // 回收站是独立视图，标题和分类无关
-  title.textContent = state.privacyMode ? '隐私空间' : (state.trash ? '回收站' : CATEGORY_LABEL[state.category])
-  // 显示的是「总数」，不是「已加载数」—— 用户关心的是这里到底有多少东西
-  count.textContent = `${state.total} 项`
+  title.textContent = state.privacyMode
+    ? '隐私空间'
+    : state.trash
+      ? '回收站'
+      : state.currentFolder
+        ? state.currentFolder.name
+        : CATEGORY_LABEL[state.category]
+  count.textContent = `${state.total + state.folders.length} 项`
   $('#trash-banner').hidden = !state.trash
+  $('#new-folder-btn').hidden = state.trash || state.privacyMode || state.category !== 'all'
+  renderFolderBreadcrumb()
 
-  if (!state.files.length) {
+  if (!state.files.length && !state.folders.length) {
     grid.innerHTML = ''
     empty.hidden = false
     const searching = Boolean(state.query)
@@ -1053,7 +1213,7 @@ function renderGrid() {
   }
 
   empty.hidden = true
-  grid.innerHTML = state.files.map(cardHtml).join('')
+  grid.innerHTML = state.folders.map(folderCardHtml).join('') + state.files.map(cardHtml).join('')
   setupMediaThumbnails(grid)
   $$('.card', grid).forEach((card, index) => {
     card.style.animationDelay = `${Math.min(index * 22, 260)}ms`
@@ -1114,6 +1274,7 @@ function buildListParams(offset) {
    */
   const params = new URLSearchParams()
   if (state.category !== 'all') params.set('category', state.category)
+  if (state.folderId) params.set('folderId', state.folderId)
   if (state.query) params.set('q', state.query)
   params.set('sort', state.sort)
   params.set('limit', String(PAGE_SIZE))
@@ -1230,6 +1391,9 @@ async function refresh({ silent = false } = {}) {
 
     // 存进状态，再据此重新渲染
     state.files = data.files
+    state.folders = data.folders || []
+    state.currentFolder = data.folder || null
+    state.breadcrumbs = data.breadcrumbs || []
     state.usage = data.usage
     state.total = data.page.total
     state.pageCount = pageCount
@@ -1286,6 +1450,9 @@ async function goToPage(page, { scroll = true } = {}) {
       pageCount = Math.max(1, Math.ceil(data.page.total / PAGE_SIZE))
     }
     state.files = data.files
+    state.folders = data.folders || []
+    state.currentFolder = data.folder || null
+    state.breadcrumbs = data.breadcrumbs || []
     state.usage = data.usage
     state.total = data.page.total
     state.pageCount = pageCount
@@ -2153,6 +2320,9 @@ function enterTrashView() {
   state.category = 'all'
   state.query = ''
   state.page = 1
+  state.folderId = null
+  state.currentFolder = null
+  state.breadcrumbs = []
   $('#search-input').value = ''
   $$('#cat-list .cat-item').forEach((item) => item.classList.remove('is-active'))
   $('#trash-btn').classList.add('is-active')
@@ -2167,6 +2337,282 @@ async function openTrashView({ silent = false } = {}) {
  * 删除 = 移入回收站，并立即打开回收站视图。
  * 服务端只是打个时间戳，文件还在，24 小时内都能捞回来。
  */
+let renamingType = ''
+let renamingId = ''
+
+function closeRenameDialog() {
+  $('#rename-modal').hidden = true
+  renamingType = ''
+  renamingId = ''
+}
+
+function openRenameDialog(type, id) {
+  const item = type === 'folder'
+    ? state.folders.find((folder) => folder.id === id)
+    : state.files.find((file) => file.id === id)
+  if (!item) return
+  renamingType = type
+  renamingId = id
+  $('#rename-title').textContent = type === 'folder' ? '重命名文件夹' : '重命名文件'
+  $('#rename-input').value = item.name
+  $('#rename-modal').hidden = false
+  $('#rename-input').focus()
+  $('#rename-input').select()
+}
+
+async function submitRename(event) {
+  event.preventDefault()
+  if (!renamingType || !renamingId) return
+  const name = $('#rename-input').value.trim()
+  if (!name) return
+  const submit = $('#rename-form button[type="submit"]')
+  submit.disabled = true
+  try {
+    const path = renamingType === 'folder' ? `/api/folders/${renamingId}` : `/api/files/${renamingId}`
+    await api(path, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    })
+    closeRenameDialog()
+    notify('名称已更新', 'ok')
+    await refresh({ silent: true })
+  } catch (error) {
+    notify(error.message)
+  } finally {
+    submit.disabled = false
+  }
+}
+let movingItem = null
+
+/**
+ * 把扁平文件夹列表解析成可读路径。
+ *
+ * 服务端返回全部有效文件夹，前端根据 parentId 临时拼路径，供“移动到文件夹”
+ * 下拉框显示。seen 用于防御异常数据形成环时无限递归。
+ */
+function folderPathLabels(folders) {
+  const byId = new Map(folders.map((folder) => [folder.id, folder]))
+  const paths = new Map()
+  const resolve = (folder, seen = new Set()) => {
+    if (!folder) return ''
+    if (paths.has(folder.id)) return paths.get(folder.id)
+    if (seen.has(folder.id)) return folder.name
+    seen.add(folder.id)
+    const parent = folder.parentId ? byId.get(folder.parentId) : null
+    const value = parent ? `${resolve(parent, seen)} / ${folder.name}` : folder.name
+    paths.set(folder.id, value)
+    return value
+  }
+  return folders
+    .map((folder) => ({ folder, label: resolve(folder) }))
+    .sort((a, b) => a.label.localeCompare(b.label, 'zh-CN'))
+}
+
+function closeMoveDialog() {
+  $('#move-modal').hidden = true
+  movingItem = null
+}
+
+/** 文件夹只能放到根目录或非自身子树，避免把树移成环。 */
+function folderMoveExclusions(folders, rootId) {
+  const excluded = new Set([rootId])
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const folder of folders) {
+      if (folder.parentId && excluded.has(folder.parentId) && !excluded.has(folder.id)) {
+        excluded.add(folder.id)
+        changed = true
+      }
+    }
+  }
+  return excluded
+}
+
+/**
+ * 打开文件 / 文件夹移动弹窗。
+ *
+ * 移动文件夹时先排除自身及其全部后代，避免用户选中必然触发 FOLDER_CYCLE 的目标；
+ * 服务端仍会再次校验，前端过滤只用于改善交互，不能替代后端约束。
+ */
+async function openMoveDialog(kind, id) {
+  const records = kind === 'folder' ? state.folders : state.files
+  const record = records.find((row) => row.id === id)
+  if (!record) return
+  try {
+    const data = await api('/api/folders')
+    const allFolders = data.folders || []
+    const excluded = kind === 'folder' ? folderMoveExclusions(allFolders, id) : new Set()
+    const select = $('#move-folder-select')
+    const folders = folderPathLabels(allFolders).filter(({ folder }) => !excluded.has(folder.id))
+    select.innerHTML = [
+      '<option value="">根目录</option>',
+      ...folders.map(({ folder, label }) => `<option value="${folder.id}">${escapeHtml(label)}</option>`),
+    ].join('')
+    select.value = (kind === 'folder' ? record.parentId : record.folderId) || ''
+    $('#move-file-name').textContent = `移动「${record.name}」到：`
+    movingItem = { kind, id }
+    $('#move-modal').hidden = false
+    select.focus()
+  } catch (error) {
+    notify(error.message)
+  }
+}
+
+async function submitMove(event) {
+  event.preventDefault()
+  if (!movingItem) return
+  const { kind, id } = movingItem
+  const folderId = $('#move-folder-select').value || null
+  const submit = $('#move-form button[type="submit"]')
+  submit.disabled = true
+  try {
+    await api(kind === 'folder' ? `/api/folders/${id}` : `/api/files/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(kind === 'folder' ? { parentId: folderId } : { folderId }),
+    })
+    closeMoveDialog()
+    notify(kind === 'folder' ? '文件夹已移动' : '文件已移动', 'ok')
+    await refresh({ silent: true })
+  } catch (error) {
+    notify(error.message)
+  } finally {
+    submit.disabled = false
+  }
+}
+/** 拖拽移动文件；目标目录未变化时直接返回，避免无意义的 PATCH。 */
+async function moveFileToTarget(fileId, folderId) {
+  const record = state.files.find((file) => file.id === fileId)
+  if (!record || (record.folderId || null) === (folderId || null)) return
+  await api(`/api/files/${fileId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ folderId: folderId || null }),
+  })
+  notify(`已移动：${record.name}`, 'ok')
+  await refresh({ silent: true })
+}
+
+/** 拖拽移动文件夹；循环目录和同名冲突由服务端最终判定。 */
+async function moveFolderToTarget(folderId, parentId) {
+  const folder = state.folders.find((item) => item.id === folderId)
+  if (!folder || (folder.parentId || null) === (parentId || null)) return
+  await api(`/api/folders/${folderId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ parentId: parentId || null }),
+  })
+  notify(`已移动文件夹：${folder.name}`, 'ok')
+  await refresh({ silent: true })
+}
+
+/** 清除所有文件夹卡片 / 面包屑上的拖拽高亮。 */
+function clearDropTargets() {
+  $$('.is-drop-target').forEach((node) => node.classList.remove('is-drop-target'))
+}
+
+/** 浏览器在 dragover 阶段通常只暴露类型，不暴露 getData() 内容。 */
+function isCardDrag(dataTransfer) {
+  if (!dataTransfer) return false
+  return Array.from(dataTransfer.types || []).includes(CARD_DRAG_MIME)
+}
+
+/** 从 drop 阶段读取卡片移动载荷；格式异常时视为普通拖拽，不抛出到事件层。 */
+function parseDraggedCard(dataTransfer) {
+  if (!dataTransfer) return null
+  try {
+    const value = dataTransfer.getData(CARD_DRAG_MIME)
+    return value ? JSON.parse(value) : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 把拖拽卡片移动到目标文件夹。
+ *
+ * 无论移动成功、失败还是载荷无效，都要在 finally 中清理高亮和内部拖拽标记，
+ * 否则后续从桌面拖入文件可能被误判为页面内部拖拽。
+ */
+async function dropCardIntoFolder(dataTransfer, targetFolderId) {
+  const item = parseDraggedCard(dataTransfer)
+  try {
+    if (!item) return
+    if (item.kind === 'folder') await moveFolderToTarget(item.id, targetFolderId)
+    else if (item.kind === 'file') await moveFileToTarget(item.id, targetFolderId)
+  } catch (error) {
+    notify(error.message)
+  } finally {
+    clearDropTargets()
+    markInternalDragEnd()
+  }
+}
+/** 新建当前目录下的文件夹。 */
+async function createFolder() {
+  if (!state.user || state.privacyMode || state.trash) return
+  const name = window.prompt('文件夹名称')
+  if (!name || !name.trim()) return
+  try {
+    await api('/api/folders', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name.trim(), parentId: state.folderId }),
+    })
+    notify('文件夹已创建', 'ok')
+    await refresh({ silent: true })
+  } catch (error) {
+    notify(error.message)
+  }
+}
+
+/** 进入指定文件夹；null 返回根目录。 */
+async function openFolder(id) {
+  state.folderId = id || null
+  state.page = 1
+  state.query = ''
+  $('#search-input').value = ''
+  await refresh()
+}
+
+async function deleteFolder(id) {
+  const folder = state.folders.find((item) => item.id === id)
+  if (!folder) return
+  if (!window.confirm(`把文件夹「${folder.name}」及其全部内容移入回收站？\n\n24 小时内可以恢复。`)) return
+  try {
+    await api(`/api/folders/${id}`, { method: 'DELETE' })
+    notify(`已移入回收站：${folder.name}`, 'ok')
+    await refresh({ silent: true })
+  } catch (error) {
+    notify(error.message)
+  }
+}
+
+async function restoreFolder(id) {
+  const folder = state.folders.find((item) => item.id === id)
+  if (!folder) return
+  try {
+    await api(`/api/folders/${id}/restore`, { method: 'POST' })
+    notify(`已恢复文件夹：${folder.name}`, 'ok')
+    await refresh({ silent: true })
+  } catch (error) {
+    notify(error.message)
+  }
+}
+
+async function purgeFolder(id) {
+  const folder = state.folders.find((item) => item.id === id)
+  if (!folder) return
+  if (!window.confirm(`彻底删除文件夹「${folder.name}」及其中全部文件？\n\n此操作不可恢复。`)) return
+  try {
+    await api(`/api/trash/folders/${id}`, { method: 'DELETE' })
+    notify(`已彻底删除文件夹：${folder.name}`, 'ok')
+    await refresh({ silent: true })
+  } catch (error) {
+    notify(error.message)
+  }
+}
 async function deleteFile(id) {
   const record = state.files.find((row) => row.id === id)
   if (!record) return
@@ -2293,6 +2739,9 @@ function bindApp() {
     if (state.privacyMode) await lockPrivacySpace()
     state.category = btn.dataset.cat
     state.page = 1
+    state.folderId = null
+    state.currentFolder = null
+    state.breadcrumbs = []
     state.trash = false                       // 从回收站切回普通列表
     $('#trash-btn').classList.remove('is-active')
     $('#privacy-btn').classList.remove('is-active')
@@ -2340,6 +2789,47 @@ function bindApp() {
   $('#zoom-in').addEventListener('click', () => zoomTo(zoom.scale * 1.3))
   $('#zoom-out').addEventListener('click', () => zoomTo(zoom.scale / 1.3))
   $('#zoom-reset').addEventListener('click', () => zoomTo(1))
+
+  $('#new-folder-btn').addEventListener('click', () => { void createFolder() })
+  $$('[data-view-mode]').forEach((button) => {
+    button.addEventListener('click', () => setViewMode(button.dataset.viewMode))
+  })
+  $('#folder-breadcrumb').addEventListener('click', (event) => {
+    const crumb = event.target.closest('[data-folder-crumb]')
+    if (!crumb) return
+    const target = crumb.dataset.folderCrumb
+    void openFolder(target === 'root' ? null : target)
+  })
+  // 面包屑本身也是放置目标：拖到「全部」回到根目录，拖到上级路径则上移。
+  const breadcrumb = $('#folder-breadcrumb')
+  breadcrumb.addEventListener('dragover', (event) => {
+    if (!isCardDrag(event.dataTransfer)) return
+    const crumb = event.target.closest('[data-folder-crumb]')
+    if (!crumb) return
+    event.preventDefault()
+    event.stopPropagation()
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+    if (!crumb.classList.contains('is-drop-target')) {
+      clearDropTargets()
+      crumb.classList.add('is-drop-target')
+    }
+  })
+  breadcrumb.addEventListener('dragleave', (event) => {
+    const crumb = event.target.closest('[data-folder-crumb]')
+    if (!crumb) return
+    if (!(event.relatedTarget instanceof Node) || !crumb.contains(event.relatedTarget)) {
+      crumb.classList.remove('is-drop-target')
+    }
+  })
+  breadcrumb.addEventListener('drop', (event) => {
+    if (!isCardDrag(event.dataTransfer)) return
+    const crumb = event.target.closest('[data-folder-crumb]')
+    if (!crumb) return
+    event.preventDefault()
+    event.stopPropagation()
+    const target = crumb.dataset.folderCrumb
+    void dropCardIntoFolder(event.dataTransfer, target === 'root' ? null : target)
+  })
 
   // 排序
   $('#sort-select').addEventListener('change', (event) => {
@@ -2437,27 +2927,104 @@ function bindApp() {
     markInternalDragEnd()
   })
 
-  // dragstart 明确标记「页面内部拖拽」；图片 / 视频本身则直接禁止拖起
+  // 卡片拖拽用于移动，和从桌面拖入上传必须明确区分，避免同一张图片被重复上传。
   document.addEventListener('dragstart', (event) => {
-    markInternalDragStart()
-    const tag = event.target && event.target.tagName
+    const target = event.target
+    const card = target && target.closest ? target.closest('.card[data-drag-kind]') : null
+    if (card && card.draggable) {
+      const kind = card.dataset.dragKind
+      const id = kind === 'folder' ? card.dataset.folderId : card.dataset.id
+      if (kind && id && event.dataTransfer) {
+        markInternalDragStart()
+        event.dataTransfer.effectAllowed = 'move'
+        event.dataTransfer.setData(CARD_DRAG_MIME, JSON.stringify({ kind, id }))
+        return
+      }
+    }
+
+    // 只有不在可拖卡片里的图片 / 视频才禁止拖起，否则缩略图会成为拖拽目标。
+    const tag = target && target.tagName
     if (tag === 'IMG' || tag === 'VIDEO') {
       event.preventDefault()
       markInternalDragEnd()
     }
   }, true)
-  document.addEventListener('dragend', markInternalDragEnd, true)
+  document.addEventListener('dragend', () => {
+    clearDropTargets()
+    markInternalDragEnd()
+  }, true)
 
   // 卡片交互（事件委托）
   const grid = $('#file-grid')
+  grid.addEventListener('dragover', (event) => {
+    if (!isCardDrag(event.dataTransfer)) return
+    const folderCard = event.target.closest('.folder-card[data-folder-id]:not(.is-in-trash)')
+    if (!folderCard) return
+    event.preventDefault()
+    event.stopPropagation()
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+    if (!folderCard.classList.contains('is-drop-target')) {
+      clearDropTargets()
+      folderCard.classList.add('is-drop-target')
+    }
+  })
+  grid.addEventListener('dragleave', (event) => {
+    const folderCard = event.target.closest('.folder-card[data-folder-id]:not(.is-in-trash)')
+    if (!folderCard) return
+    if (!(event.relatedTarget instanceof Node) || !folderCard.contains(event.relatedTarget)) {
+      folderCard.classList.remove('is-drop-target')
+    }
+  })
+  grid.addEventListener('drop', (event) => {
+    if (!isCardDrag(event.dataTransfer)) return
+    const folderCard = event.target.closest('.folder-card[data-folder-id]:not(.is-in-trash)')
+    if (!folderCard) return
+    event.preventDefault()
+    event.stopPropagation()
+    void dropCardIntoFolder(event.dataTransfer, folderCard.dataset.folderId)
+  })
   grid.addEventListener('click', (event) => {
     const card = event.target.closest('.card')
     if (!card) return
+    const folderCard = event.target.closest('.folder-card')
+    if (folderCard) {
+      const folderId = folderCard.dataset.folderId
+      const more = event.target.closest('[data-more]')
+      if (more) {
+        event.stopPropagation()
+        openCardMenu(more, 'folder', folderId)
+        return
+      }
+      if (event.target.closest('[data-folder-rename]')) openRenameDialog('folder', folderId)
+      else if (event.target.closest('[data-folder-delete]')) deleteFolder(folderId)
+      else if (event.target.closest('[data-folder-restore]')) restoreFolder(folderId)
+      else if (event.target.closest('[data-folder-purge]')) purgeFolder(folderId)
+      else if (event.target.closest('[data-folder-download]')) {
+        event.preventDefault()
+        const folder = state.folders.find((item) => item.id === folderId)
+        if (folder && window.VaultTransfers) void window.VaultTransfers.startFolderDownload(folder)
+      } else if (event.target.closest('[data-folder-open]')) openFolder(folderId)
+      return
+    }
+    const more = event.target.closest('[data-more]')
+    if (more) {
+      event.stopPropagation()
+      openCardMenu(more, 'file', card.dataset.id)
+      return
+    }
     const downloadLink = event.target.closest('[data-download]')
     if (downloadLink) {
       event.preventDefault()
       const record = state.files.find((row) => row.id === card.dataset.id)
       if (record && window.VaultTransfers) void window.VaultTransfers.startDownload(record)
+      return
+    }
+    if (event.target.closest('[data-rename-file]')) {
+      openRenameDialog('file', card.dataset.id)
+      return
+    }
+    if (event.target.closest('[data-move]')) {
+      void openMoveDialog('file', card.dataset.id)
       return
     }
     if (event.target.closest('[data-private]')) {
@@ -2492,6 +3059,10 @@ function bindApp() {
     const card = event.target.closest('.card')
     if (!card) return
     event.preventDefault()
+    if (card.classList.contains('folder-card')) {
+      if (card.dataset.folderId && !card.classList.contains('is-in-trash')) openFolder(card.dataset.folderId)
+      return
+    }
     openLightbox(card.dataset.id)
   })
 
@@ -2531,10 +3102,28 @@ function bindApp() {
     else deleteFile(record.id)
   })
 
+  $('#card-menu').addEventListener('click', (event) => {
+    const item = event.target.closest('[data-card-menu-action]')
+    if (item) runCardMenuAction(item.dataset.cardMenuAction)
+  })
+  document.addEventListener('pointerdown', (event) => {
+    if (!event.target.closest('#card-menu') && !event.target.closest('[data-more]')) closeCardMenu()
+  }, true)
+  window.addEventListener('scroll', closeCardMenu, true)
+  window.addEventListener('resize', closeCardMenu)
+
   // 弹窗关闭
   $('#password-modal').addEventListener('click', (event) => {
     if (event.target.closest('[data-close]')) $('#password-modal').hidden = true
   })
+  $('#move-modal').addEventListener('click', (event) => {
+    if (event.target.closest('[data-move-close]')) closeMoveDialog()
+  })
+  $('#move-form').addEventListener('submit', (event) => { void submitMove(event) })
+  $('#rename-modal').addEventListener('click', (event) => {
+    if (event.target.closest('[data-rename-close]')) closeRenameDialog()
+  })
+  $('#rename-form').addEventListener('submit', (event) => { void submitRename(event) })
 
   document.addEventListener('keydown', (event) => {
     if (!$('#lightbox').hidden && zoom.el) {
@@ -2602,7 +3191,10 @@ function bindApp() {
       }
     }
     if (event.key !== 'Escape') return
-    if (!$('#privacy-modal').hidden) closePrivacyAuthDialog(false)
+    if (!$('#card-menu').hidden) closeCardMenu()
+    else if (!$('#privacy-modal').hidden) closePrivacyAuthDialog(false)
+    else if (!$('#move-modal').hidden) closeMoveDialog()
+    else if (!$('#rename-modal').hidden) closeRenameDialog()
     else if (!$('#lightbox').hidden) closeLightbox()
     else if (!$('#password-modal').hidden) $('#password-modal').hidden = true
     else if (!$('#user-dropdown').hidden) $('#user-dropdown').hidden = true

@@ -42,6 +42,8 @@ test('imports without opening a database and requires explicit initialization', 
     assert.equal(fs.existsSync(uploadDir), true)
     assert.equal(db.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'files'").get().n, 1)
     assert.equal(db.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'sessions'").get().n, 1)
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'folders'").get().n, 1)
+    assert.ok(db.prepare('PRAGMA table_info(files)').all().some((column) => column.name === 'folder_id'))
     assert.equal(db.prepare('PRAGMA foreign_keys').get().foreign_keys, 1)
     assert.deepEqual(listFiles({ ownerId: 'u_not_initialized' }), [])
 

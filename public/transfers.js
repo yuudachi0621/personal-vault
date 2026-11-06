@@ -150,6 +150,7 @@ function transferTaskActions(task) {
 
   if (task.status === 'running') {
     if (task.kind === 'upload' && task.finalizing) return '<button type="button" disabled>正在保存</button>'
+    if (task.kind === 'download' && task.resumable === false) return button('cancel', '取消', 'is-danger')
     return `${button('pause', '暂停')}${button('cancel', '取消', 'is-danger')}`
   }
   if (task.status === 'waiting') {
@@ -359,6 +360,7 @@ function persistUploadTasks() {
       signature: task.signature,
       offset: task.offset,
       isPrivate: task.isPrivate,
+      folderId: task.folderId || null,
       updatedAt: new Date().toISOString(),
     }))
   writeStoredTransferList(transferStoreKey(UPLOAD_STORE_PREFIX), records)
@@ -472,6 +474,7 @@ async function restoreTransferTasks() {
       offset: Number(saved.offset) || 0,
       loaded: Number(saved.offset) || 0,
       isPrivate: Boolean(saved.isPrivate),
+      folderId: saved.folderId || null,
       status: 'paused',
       error: '页面已刷新，请重新选择原文件后继续。',
       retryable: true,
@@ -563,6 +566,7 @@ function createUploadTask(file) {
     offset: 0,
     loaded: 0,
     isPrivate: state.privacyMode,
+    folderId: state.folderId || null,
     status: 'waiting',
     error: '',
     retryable: true,
@@ -728,6 +732,7 @@ async function createUploadSession(task) {
       mime: task.mime,
       size: task.size,
       private: task.isPrivate,
+      folderId: task.folderId || null,
     }),
   })
   task.uploadId = data.upload.id
@@ -1129,6 +1134,7 @@ function browserDownload(record) {
     createdAt: Date.now(),
   }
   transfers.downloads.push(task)
+  transfers.activeTab = 'download'
   renderTransferPanel()
   const anchor = document.createElement('a')
   anchor.href = apiUrl(`/api/files/${record.id}/download`)
@@ -1139,6 +1145,89 @@ function browserDownload(record) {
   anchor.remove()
 }
 
+function browserFolderDownload(folder) {
+  const { state, apiUrl } = host()
+  const task = {
+    id: newTransferId('download'),
+    kind: 'download',
+    ownerId: state.user.id,
+    folderDownload: true,
+    recordId: null,
+    downloadUrl: apiUrl(`/api/folders/${folder.id}/download`),
+    name: `${folder.name}.zip`,
+    size: 0,
+    offset: 0,
+    loaded: 0,
+    status: 'external',
+    error: '当前浏览器不支持页面内保存文件夹 ZIP，已交给浏览器下载。',
+    retryable: false,
+    resumable: false,
+    handle: null,
+    writable: null,
+    controller: null,
+    speed: 0,
+    createdAt: Date.now(),
+  }
+  transfers.downloads.push(task)
+  transfers.activeTab = 'download'
+  renderTransferPanel()
+  const anchor = document.createElement('a')
+  anchor.href = task.downloadUrl
+  anchor.download = task.name
+  anchor.rel = 'noopener'
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+  openTransferView()
+}
+
+async function startFolderDownload(folder) {
+  const { state, notify } = host()
+  if (!folder || !state.user) return
+  if (!supportsResumableDownload()) {
+    browserFolderDownload(folder)
+    return
+  }
+  let handle
+  try {
+    handle = await window.showSaveFilePicker({ suggestedName: `${folder.name}.zip` })
+  } catch (error) {
+    if (error && error.name === 'AbortError') return
+    notify(`无法打开保存位置：${error.message}`)
+    return
+  }
+  const task = {
+    id: newTransferId('download'),
+    kind: 'download',
+    ownerId: state.user.id,
+    folderDownload: true,
+    recordId: null,
+    downloadUrl: host().apiUrl(`/api/folders/${folder.id}/download`),
+    name: `${folder.name}.zip`,
+    size: 0,
+    offset: 0,
+    loaded: 0,
+    status: 'waiting',
+    error: '',
+    retryable: false,
+    resumable: false,
+    handle,
+    writable: null,
+    controller: null,
+    speed: 0,
+    lastSampleAt: 0,
+    lastSampleLoaded: 0,
+    pendingPermission: false,
+    resetDestination: true,
+    createdAt: Date.now(),
+  }
+  transfers.downloads.push(task)
+  transfers.activeTab = 'download'
+  await storeDownloadHandle(task.id, handle)
+  renderTransferPanel()
+  openTransferView()
+  startDownloadRun(task)
+}
 async function startRecordDownload(record) {
   const { state, notify } = host()
   if (!record || !state.user) return
@@ -1405,6 +1494,26 @@ async function handleDownloadFailure(task, error) {
   persistDownloadTasks()
 }
 
+async function performFolderDownloadTask(task) {
+  await ensureDownloadPermission(task)
+  await ensureDownloadWritable(task)
+  task.controller = new AbortController()
+  const response = await fetch(task.downloadUrl, {
+    credentials: 'include',
+    cache: 'no-store',
+    signal: task.controller.signal,
+  })
+  if (!response.ok) throw await downloadResponseError(response)
+  const length = Number(response.headers.get('Content-Length'))
+  if (Number.isFinite(length) && length > 0) task.size = length
+  await writeFullDownload(task, response)
+  if (task.status !== 'running') return
+  task.status = 'processing'
+  scheduleTransferRender()
+  if (!task.size) task.size = task.loaded
+  await completeDownloadTask(task)
+}
+
 async function performDownloadTask(task) {
   const { apiUrl } = host()
   await ensureDownloadPermission(task)
@@ -1476,7 +1585,7 @@ function startDownloadRun(task) {
   task.error = ''
   resetTransferSpeed(task)
   scheduleTransferRender()
-  const run = performDownloadTask(task)
+  const run = (task.folderDownload ? performFolderDownloadTask(task) : performDownloadTask(task))
     .catch((error) => handleDownloadFailure(task, error))
     .finally(() => {
       downloadRuns.delete(task.id)
@@ -1519,6 +1628,7 @@ async function resumeDownloadTask(task) {
 }
 
 function pauseDownloadTask(task) {
+  if (task.resumable === false) return
   if (task.status === 'waiting') {
     task.status = 'paused'
     task.error = ''
@@ -1673,6 +1783,7 @@ function bindTransferApp() {
 window.VaultTransfers = {
   uploadFiles: enqueueUploadFiles,
   startDownload: startRecordDownload,
+  startFolderDownload,
   restore: restoreTransferTasks,
   pauseForAuth: pauseTransfersForAuth,
   pausePrivate: pausePrivateTransfers,
