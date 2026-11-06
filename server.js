@@ -18,7 +18,7 @@
  *   打开 HTTP 端口（默认 8787），为每个请求设置基础安全响应头，
  *   先处理 CORS / API，再按配置决定是否托管 public/。
  *   启动阶段还会初始化配置与数据库、执行历史数据迁移、打印运行模式，
- *   并启动回收站定时清扫；退出时负责关闭 SQLite 连接。
+ *   并启动回收站定时清扫；退出时停止接收新连接、等待在途请求并关闭 SQLite。
  *
  * 【读代码前需要知道的 4 个概念】
  *
@@ -39,36 +39,31 @@
  */
 
 import http from 'node:http'                                   // Node 自带的 HTTP 模块
-import { handleApi, startTrashSweeper } from './lib/api.js'      // 处理 /api/** 接口请求
-import { serveStatic } from './lib/static.js'                  // 返回前端静态文件
-import { applyCors, handlePreflight, corsSummary } from './lib/cors.js'  // 跨域支持
 import {
   SERVE_STATIC,
   describeMode,
   describeRegistration,
-  CONFIG_JUST_CREATED,
-  REGISTRATION_CODE,
+  initializeConfig,
+  PORT,
   requestProtocol,
 } from './lib/config.js'   // 部署配置
-import {
-  migrationResult,
-  mediaCategoryFixResult,
-  closeDb,
-} from './lib/db.js'   // 数据库（顺便触发建表/迁移）
+import { parseRequestUrl } from './lib/request-url.js'
+import { createShutdownHandler } from './lib/shutdown.js'
+import { logEvent, newRequestId } from './lib/logger.js'
+import { handleApi, startTrashSweeper } from './lib/api.js'      // 处理 /api/** 接口请求
+import { serveStatic } from './lib/static.js'                  // 返回前端静态文件
+import { applyCors, handlePreflight, corsSummary } from './lib/cors.js'  // 跨域支持
+import { initializeDatabase, closeDb } from './lib/db.js'
 import { databaseStats } from './lib/store.js'                  // 统计信息
-
-/**
- * process.env 是「环境变量」，可以在启动时从外部传入，用来改变程序行为。
- * 例如：PORT=9000 node server.js 就会监听 9000 端口。
- * `|| 8787` 表示没传就默认 8787。
- */
-const PORT = Number(process.env.PORT || 8787)
 
 /**
  * 0.0.0.0 表示「监听本机所有网卡」，外部机器也能连进来。
  * 如果写 127.0.0.1，就只有本机能访问，部署到服务器后外面打不开。
  */
 const HOST = '0.0.0.0'
+let trashSweeperTimer = null
+const fileConfig = initializeConfig()
+const { migrationResult, mediaCategoryFixResult } = await initializeDatabase()
 
 /**
  * 创建服务器。注意这里只是「创建」，还没开始监听 ——
@@ -78,15 +73,19 @@ const HOST = '0.0.0.0'
  * 参数 req/res 对应这一次的请求和响应。
  */
 const server = http.createServer(async (req, res) => {
-  /**
-   * req.url 是请求地址，比如 '/api/files?sort=newest'。
-   * new URL() 把它解析成方便读取的对象：
-   *   url.pathname   → '/api/files'      路径
-   *   url.searchParams.get('sort') → 'newest'  查询参数
-   * 第二个参数是「基准地址」，因为 req.url 是相对路径，需要一个完整的地址才能解析。
-   */
-  const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`)
-
+  const requestId = newRequestId()
+  req.requestId = requestId
+  res.setHeader('X-Request-Id', requestId)
+  const startedAt = performance.now()
+  res.once('finish', () => {
+    logEvent('info', 'http_request', {
+      requestId,
+      method: req.method,
+      path: req.logPath || 'invalid',
+      status: res.statusCode,
+      durationMs: Math.round(performance.now() - startedAt),
+    })
+  })
   // ── 基础安全响应头 ──────────────────────────────────────────────────────
   // 每收到一个请求都会先设置这几项，用来收紧浏览器的默认行为。
   res.setHeader('X-Content-Type-Options', 'nosniff')   // 不许浏览器「猜」文件类型
@@ -104,6 +103,14 @@ const server = http.createServer(async (req, res) => {
    * 返回一个 500 而不是让整个程序崩溃退出。
    */
   try {
+    // req.url 只提供路径和查询参数，使用固定内部基准，绝不能依赖客户端 Host。
+    const url = parseRequestUrl(req.url)
+    req.logPath = url ? url.pathname : 'invalid'
+    if (!url) {
+      res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
+      return res.end(JSON.stringify({ error: '请求地址无效', code: 'INVALID_URL' }))
+    }
+
     // ── 第 1 步：跨域检查 ────────────────────────────────────────────────
     // applyCors 会补上跨域响应头。返回 false 说明这个来源不被允许，
     // 直接 403 拒绝，后面的业务逻辑一概不执行。
@@ -139,7 +146,7 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' })
     res.end(JSON.stringify({ error: '接口不存在', code: 'NOT_FOUND' }))
   } catch (error) {
-    console.error('[server]', error)   // 打到终端，方便排查
+    logEvent('error', 'server_error', { requestId, message: error && error.message, stack: error && error.stack })
     // headersSent 判断「响应头是不是已经发出去了」。
     // 已经发出去就不能再改状态码了，否则 Node 会报错，所以这里要判断一下。
     if (!res.headersSent) {
@@ -178,20 +185,24 @@ server.listen(PORT, HOST, () => {
   console.log(`  注册策略：${describeRegistration()}`)
 
   // 首次启动会自动生成 config.json 和随机注册码，这里把码打出来方便直接使用
-  if (CONFIG_JUST_CREATED) {
+  if (fileConfig.justCreated) {
     console.log('')
+    // 安全审计注记：注册码会进入启动日志；应优先仅在交互式 TTY 中显示。
     console.log('  已生成 config.json，本次注册码：')
-    console.log(`      ${REGISTRATION_CODE}`)
+    console.log(`      ${fileConfig.registrationCode}`)
     console.log('  把它发给要注册的人。想更换就直接改 config.json 里的 registrationCode，重启生效。')
     console.log('')
   }
 
-  // 如果这次启动检测到了旧的 JSON 数据，说明刚做完迁移，值得明确告诉用户
+  // 如果这次启动检测到了旧的 JSON 数据，说明刚做完迁移，值得明确告诉用户。
   if (!migrationResult.skipped) {
     console.log(`  数据迁移：已从 JSON 导入 ${migrationResult.users} 个用户、${migrationResult.files} 条文件记录`)
-    console.log('           旧文件已备份为 data/*.json.migrated')
+    if (migrationResult.warnings.length) {
+      for (const warning of migrationResult.warnings) console.warn(`  数据迁移警告：${warning}`)
+    } else {
+      console.log('           旧文件已备份为 data/*.json.migrated')
+    }
   }
-
   if (mediaCategoryFixResult.fixed > 0) {
     console.log(`  分类修复：已修正 ${mediaCategoryFixResult.fixed} 个历史媒体文件的分类`)
   }
@@ -200,30 +211,26 @@ server.listen(PORT, HOST, () => {
   console.log(`  数据库：${stats.users} 个用户 · ${stats.files} 条文件记录`)
 
   // 启动回收站的定时清扫（启动时先扫一次，之后每 10 分钟一次）
-  startTrashSweeper()
+  trashSweeperTimer = startTrashSweeper()
   console.log('  回收站：删除的文件保留 24 小时，超时自动清除')
 })
 
-// 三十秒？不，是 30 分钟。允许传大文件，但也给一个绝对上限，
-// 避免恶意连接无限期占用。真正防「半死不活连接」的是上传时的空闲超时（见 lib/api.js）。
+// 允许大文件上传，但给整个请求一个绝对上限。
+// 普通 JSON 请求体另有更短的读取超时（见 lib/request-body.js），不会占用 30 分钟。
 server.requestTimeout = 30 * 60_000
 // 读取请求头的超时限制为 60 秒，避免有人连上却不发数据、白占连接
 server.headersTimeout = 60_000
 
-/**
- * 优雅退出：收到终止信号时先把数据库关掉。
- *
- * 为什么重要？
- *   SQLite 的 WAL 模式下，最新写入可能仍在 -wal 文件中。
- *   正常 close() 会触发 checkpoint 并关闭连接，减少遗留 WAL/SHM 文件。
- *   强制终止通常能保持数据库一致性，但最近的已提交数据仍可能因
- *   操作系统缓存和 synchronous=NORMAL 策略而丢失，因此应优先优雅退出。
- */
-function shutdown(signal) {
-  console.log(`\n收到 ${signal}，正在关闭…`)
-  closeDb()
-  process.exit(0)
-}
+const shutdown = createShutdownHandler({
+  server,
+  closeDb,
+  beforeClose() {
+    if (trashSweeperTimer) {
+      clearInterval(trashSweeperTimer)
+      trashSweeperTimer = null
+    }
+  },
+})
 
 process.on('SIGINT', () => shutdown('SIGINT'))
 process.on('SIGTERM', () => shutdown('SIGTERM'))

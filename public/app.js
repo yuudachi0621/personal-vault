@@ -160,6 +160,7 @@ window.VaultTransferHost = {
  *   现在一次只拿 30 条，通过底部分页控件切换页面。
  */
 const PAGE_SIZE = 30
+let listRequestVersion = 0
 const VIDEO_QUALITY_KEY = 'personal-vault:video-quality'
 const PRIVACY_IDLE_MS = 10 * 60 * 1000
 const PRIVACY_HEARTBEAT_MS = 4 * 60 * 1000
@@ -287,7 +288,6 @@ function uniqueFiles(fileList) {
  *
  * 改动前端功能时记得同步这里和 package.json。
  */
-const APP_VERSION = '1.9.11'
 
 /**
  * 调用后端 JSON API，并把非 2xx 响应转换为异常。
@@ -298,41 +298,53 @@ const APP_VERSION = '1.9.11'
  * @throws {Error & {status?: number, code?: string}} HTTP 非 2xx 时抛出
  */
 async function api(path, options = {}) {
-  /**
-   * fetch 发起 HTTP 请求。两个要点：
-   *   credentials: 'include' —— 让浏览器带上 Cookie。
-   *     不带的话服务器认不出你是谁，所有需要登录的接口都会返回 401。
-   *     这个值同时适用同源与跨域两种部署形态。
-   *   ...options 展开 —— 把调用方传进来的 method / headers / body 合进来。
-   *     如果 options 里也有 credentials，会覆盖上面的默认值。
-   */
-  const res = await fetch(apiUrl(path), { credentials: 'include', ...options })
+  const { timeoutMs = 30_000, signal, ...fetchOptions } = options
+  const controller = signal ? null : new AbortController()
+  const effectiveSignal = signal || controller.signal
+  let timedOut = false
+  const timer = controller && timeoutMs > 0
+    ? setTimeout(() => {
+      timedOut = true
+      controller?.abort()
+    }, timeoutMs)
+    : 0
 
-  // 先尝试把响应解析成 JSON。有些错误响应可能不是 JSON（比如网关返回的 HTML），
-  // 所以包一层 try，解析失败就让 body 保持 null，不至于整个函数崩掉。
-  let body = null
   try {
-    body = await res.json()
-  } catch {
-    /* 非 JSON 响应 */
-  }
+    const res = await fetch(apiUrl(path), {
+      credentials: 'include',
+      ...fetchOptions,
+      signal: effectiveSignal,
+    })
 
-  /**
-   * res.ok 是浏览器提供的便捷属性：状态码在 200~299 之间时为 true。
-   *
-   * 这里的关键设计：把「失败」变成「抛异常」。
-   * 于是调用方可以统一写成 try/catch，不用每次都判断 res.ok。
-   * 而且把后端的错误码和错误信息挂在 error 对象上，
-   * 调用方就能区分「没登录（401）」和「其它失败」。
-   */
-  if (!res.ok) {
-    const error = new Error((body && body.error) || `请求失败（${res.status}）`)
-    error.status = res.status
-    error.code = body && body.code
+    let body = null
+    try {
+      body = await res.json()
+    } catch {
+      /* 非 JSON 响应 */
+    }
+
+    if (!res.ok) {
+      const error = new Error((body && body.error) || `请求失败（${res.status}）`)
+      error.status = res.status
+      error.code = body && body.code
+      throw error
+    }
+    return body
+  } catch (error) {
+    if (error && error.name === 'AbortError') {
+      const abortError = new Error(timedOut ? '请求超时，请稍后重试' : '请求已取消')
+      abortError.code = timedOut ? 'REQUEST_TIMEOUT' : 'ABORTED'
+      throw abortError
+    }
+    if (error && !error.status && error.name === 'TypeError') {
+      const networkError = new Error('网络连接失败，请检查连接后重试')
+      networkError.code = 'NETWORK_ERROR'
+      throw networkError
+    }
     throw error
+  } finally {
+    clearTimeout(timer)
   }
-
-  return body
 }
 
 /* ───────────────────────────── Toast ───────────────────────────── */
@@ -703,7 +715,11 @@ function bindAuth() {
   $$('[data-auth-tab]').forEach((btn) => {
     btn.addEventListener('click', () => {
       const tab = btn.dataset.authTab
-      $$('[data-auth-tab]').forEach((b) => b.classList.toggle('is-active', b === btn))
+      $$('[data-auth-tab]').forEach((b) => {
+        const selected = b === btn
+        b.classList.toggle('is-active', selected)
+        b.setAttribute('aria-selected', String(selected))
+      })
       $('#login-form').hidden = tab !== 'login'
       $('#register-form').hidden = tab !== 'register'
       $$('.form-error').forEach((node) => { node.hidden = true })
@@ -806,6 +822,7 @@ function bindAuth() {
     $('[data-error]', modal).hidden = true
     $('#password-form').reset()
     modal.hidden = false
+    setTimeout(() => $('#password-form [name="oldPassword"]').focus(), 0)
   })
 
   $('#password-form').addEventListener('submit', async (event) => {
@@ -1185,6 +1202,9 @@ async function fetchPage(offset) {
  * @returns {Promise<void>}
  */
 async function refresh({ silent = false } = {}) {
+  const requestVersion = ++listRequestVersion
+  // refresh 会替代任何进行中的分页加载，避免旧分页请求留下永久 loading 状态。
+  state.loadingMore = false
   const skeleton = $('#skeleton')
 
   // 首次加载（列表还是空的）时显示骨架屏占位，让用户知道正在加载
@@ -1197,12 +1217,14 @@ async function refresh({ silent = false } = {}) {
   try {
     // 筛选和排序都由后端做（数据在服务器那边），前端只负责把条件传过去
     let data = await fetchPage((state.page - 1) * PAGE_SIZE)
+    if (requestVersion !== listRequestVersion) return
     let pageCount = Math.max(1, Math.ceil(data.page.total / PAGE_SIZE))
 
     // 删除当前页最后几条后，自动回退到仍然有效的最后一页。
     if (!data.files.length && state.page > pageCount) {
       state.page = pageCount
       data = await fetchPage((state.page - 1) * PAGE_SIZE)
+      if (requestVersion !== listRequestVersion) return
       pageCount = Math.max(1, Math.ceil(data.page.total / PAGE_SIZE))
     }
 
@@ -1217,6 +1239,7 @@ async function refresh({ silent = false } = {}) {
     renderUsage()   // 画侧栏的用量统计
     renderPagination()
   } catch (error) {
+    if (requestVersion !== listRequestVersion) return
     /**
      * PRIVACY_LOCKED 只表示隐私解锁过期，应弹出隐私密码框而不是退出登录；
      * 其它 401 才说明普通登录会话已失效。
@@ -1231,8 +1254,8 @@ async function refresh({ silent = false } = {}) {
     }
     notify(error.message)
   } finally {
-    // finally 里的代码无论成功失败都会执行，适合放「收尾」动作
-    skeleton.hidden = true
+    // 只有最新请求可以结束骨架屏加载状态。
+    if (requestVersion === listRequestVersion) skeleton.hidden = true
   }
 }
 
@@ -1247,16 +1270,19 @@ async function goToPage(page, { scroll = true } = {}) {
   const target = Math.max(1, Math.min(state.pageCount || 1, Math.floor(Number(page) || 1)))
   if (state.loadingMore || (target === state.page && state.files.length)) return
 
+  const requestVersion = ++listRequestVersion
   state.loadingMore = true
   renderPagination()
 
   try {
     let actualPage = target
     let data = await fetchPage((actualPage - 1) * PAGE_SIZE)
+    if (requestVersion !== listRequestVersion) return
     let pageCount = Math.max(1, Math.ceil(data.page.total / PAGE_SIZE))
     if (!data.files.length && actualPage > pageCount) {
       actualPage = pageCount
       data = await fetchPage((actualPage - 1) * PAGE_SIZE)
+      if (requestVersion !== listRequestVersion) return
       pageCount = Math.max(1, Math.ceil(data.page.total / PAGE_SIZE))
     }
     state.files = data.files
@@ -1270,6 +1296,7 @@ async function goToPage(page, { scroll = true } = {}) {
     renderUsage()
     if (scroll) window.scrollTo({ top: 0, behavior: 'smooth' })
   } catch (error) {
+    if (requestVersion !== listRequestVersion) return
     if (error.code === 'PRIVACY_LOCKED') {
       await recoverPrivacyAccess()
       return
@@ -1280,8 +1307,10 @@ async function goToPage(page, { scroll = true } = {}) {
     }
     notify(error.message)
   } finally {
-    state.loadingMore = false
-    renderPagination()
+    if (requestVersion === listRequestVersion) {
+      state.loadingMore = false
+      renderPagination()
+    }
   }
 }
 /**
@@ -2548,6 +2577,30 @@ function bindApp() {
       }
     }
 
+    if (event.key === 'Tab') {
+      const overlay = !$('#privacy-modal').hidden
+        ? $('#privacy-modal')
+        : (! $('#password-modal').hidden ? $('#password-modal') : (!$('#lightbox').hidden ? $('#lightbox') : null))
+      if (overlay) {
+        const focusable = $$('button:not([disabled]), input:not([disabled]), select:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])', overlay)
+          .filter((node) => !node.hidden && node.getClientRects().length > 0)
+        if (focusable.length) {
+          const first = focusable[0]
+          const last = focusable[focusable.length - 1]
+          const active = document.activeElement
+          if (event.shiftKey && (active === first || !overlay.contains(active))) {
+            event.preventDefault()
+            last.focus()
+            return
+          }
+          if (!event.shiftKey && (active === last || !overlay.contains(active))) {
+            event.preventDefault()
+            first.focus()
+            return
+          }
+        }
+      }
+    }
     if (event.key !== 'Escape') return
     if (!$('#privacy-modal').hidden) closePrivacyAuthDialog(false)
     else if (!$('#lightbox').hidden) closeLightbox()
@@ -2618,10 +2671,20 @@ async function loadAuthConfig() {
  *   3. 查询当前登录用户，成功后清除旧隐私解锁并加载第一页文件
  *   4. 未登录或会话失效时显示登录页
  */
+async function loadAppVersion() {
+  try {
+    const { version } = await api('/api/meta')
+    const label = version ? `v${version}` : 'v—'
+    $('#app-version').textContent = label
+    $('#auth-version').textContent = label
+  } catch {
+    $('#app-version').textContent = 'v—'
+    $('#auth-version').textContent = 'v—'
+  }
+}
 async function boot() {
-  // 把前端版本号写进界面，方便判断当前跑的是哪一版
-  $('#app-version').textContent = `v${APP_VERSION}`
-  $('#auth-version').textContent = `v${APP_VERSION}`
+  // 版本号以 package.json 为唯一来源，由服务端公开接口提供。
+  void loadAppVersion()
   applySiteFooter()
 
   // 先挂监听器。这样即使用户在数据还没加载完时就点击，也能正常响应。
@@ -2650,9 +2713,11 @@ async function boot() {
     await window.VaultTransfers?.restore()
     await refresh()   // 登录状态确认后，才去加载文件列表
     await privacyReloadLockPromise
-  } catch {
-    // 走到这里说明没登录（或令牌过期、服务器出错），一律退回登录页
+  } catch (error) {
     showAuth()
+    if (!error || error.status !== 401) {
+      notify((error && error.message) || '无法加载账号状态，请稍后重试')
+    }
   }
 }
 

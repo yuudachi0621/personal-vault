@@ -343,6 +343,8 @@ function resetTransferSpeed(task) {
   task.lastSampleAt = 0
   task.lastSampleLoaded = task.loaded
 }
+// 安全审计注记：任务元数据包含真实文件名和隐私标记，会写入 localStorage。
+// 后续应避免持久化隐私文件名称，或在锁定时主动清理。
 function persistUploadTasks() {
   const records = transfers.uploads
     .filter((task) => task.uploadId && !TERMINAL_TRANSFER_STATUSES.has(task.status))
@@ -1307,7 +1309,12 @@ async function writeResumedChunk(task, bytes, startOffset) {
 }
 
 async function writeFullDownload(task, response) {
+  const responseSize = Number(response.headers.get('Content-Length'))
+  if (Number.isFinite(responseSize) && responseSize > 0) task.size = responseSize
+
   await task.writable.truncate(0)
+  // truncate 不保证重置写入位置；续传后收到 200 时必须显式回到文件开头。
+  if (typeof task.writable.seek === 'function') await task.writable.seek(0)
   task.offset = 0
   task.loaded = 0
   if (!response.body) {

@@ -32,8 +32,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#faf9f5">
   <title>个人云存储 · 视频 / 照片 / 文件</title>
-  <link rel="icon" href="/favicon.svg?v=1.9.11">
-  <link rel="stylesheet" href="/styles.css?v=1.9.11">
+  <link rel="icon" href="/favicon.svg">
+  <link rel="stylesheet" href="/styles.css">
 </head>
 
 <body>
@@ -64,12 +64,12 @@
     <main class="auth-panel">
       <div class="auth-card">
         <div class="seg" role="tablist">
-          <button type="button" class="seg-btn is-active" data-auth-tab="login" role="tab">登录</button>
-          <button type="button" class="seg-btn" data-auth-tab="register" role="tab">注册</button>
+          <button type="button" class="seg-btn is-active" id="auth-tab-login" data-auth-tab="login" role="tab" aria-selected="true" aria-controls="login-form">登录</button>
+          <button type="button" class="seg-btn" id="auth-tab-register" data-auth-tab="register" role="tab" aria-selected="false" aria-controls="register-form">注册</button>
         </div>
 
         <!-- 登录 -->
-        <form id="login-form" class="auth-form" autocomplete="on">
+        <form id="login-form" class="auth-form" role="tabpanel" aria-labelledby="auth-tab-login" autocomplete="on">
           <label class="field">
             <span>邮箱</span>
             <input type="email" name="email" required placeholder="you@example.com" autocomplete="email">
@@ -84,7 +84,7 @@
         </form>
 
         <!-- 注册 -->
-        <form id="register-form" class="auth-form" autocomplete="on" hidden>
+        <form id="register-form" class="auth-form" role="tabpanel" aria-labelledby="auth-tab-register" autocomplete="on" hidden>
           <label class="field">
             <span>邮箱</span>
             <input type="email" name="email" required placeholder="you@example.com" autocomplete="email">
@@ -502,9 +502,9 @@
 
   <div id="toasts" class="toasts" aria-live="polite"></div>
 
-  <script src="/config.js?v=1.9.11"></script>
-  <script src="/app.js?v=1.9.11"></script>
-  <script src="/transfers.js?v=1.9.11"></script>
+  <script src="/config.js"></script>
+  <script src="/app.js"></script>
+  <script src="/transfers.js"></script>
 </body>
 
 </html>

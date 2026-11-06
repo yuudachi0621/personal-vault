@@ -108,74 +108,88 @@
 
 ```text
 浏览器
-  │
-  ├─ GET /、/styles.css、/app.js、/transfers.js …… ──> server.js ──> lib/static.js
-  │
-  └─ /api/** ─────────────────────────> lib/api.js
-                                           ├─ lib/config.js       部署、CORS、Cookie、容量
-                                           ├─ lib/rate-limit.js   单进程内存限流
-                                           ├─ lib/auth.js         密码哈希、签名令牌、Cookie
-                                           ├─ lib/store.js        参数化 SQL 数据访问
-                                           ├─ lib/media.js        MIME 与分类
-                                           ├─ lib/video-preview.js 可选视频预览转码
-                                           └─ lib/media-thumbnail.js 照片 / 视频封面生成与缓存
-                                                   │
-                                                   └─ lib/db.js ──> data/vault.db
-                                                                 └─ data/uploads/
-                                                                 └─ data/previews/
+  ├─ 静态资源 ───────────────> server.js → lib/static.js
+  └─ /api/** → lib/api.js（路由与认证闸门）
+                  ├─ lib/api/auth.js       注册、登录、改密
+                  ├─ lib/api/privacy.js    隐私空间
+                  ├─ lib/api/uploads.js    分块/兼容上传
+                  ├─ lib/api/files.js      文件与回收站
+                  ├─ lib/api/core.js       会话、限流、映射、文件工具
+                  ├─ lib/store.js          参数化 SQL
+                  ├─ lib/db.js             SQLite、schema、迁移
+                  └─ lib/migrations.js     编号式迁移事务
 ```
 
 关键设计：
 
-- `server.js` 只负责进程启动、安全响应头、CORS / API / 静态资源分流和优雅退出。
-- `lib/api.js` 集中处理认证、文件、回收站、隐私空间与分块上传接口；`lib/upload-session.js` 管理可续传临时会话。
-- `public/app.js` 负责主界面和文件列表，`public/transfers.js` 独立维护上传 / 下载任务队列与传输页。
-- `lib/store.js` 封装全部 SQL，文件查询都带 `owner_id` 条件。
-- 普通登录 Cookie 与隐私解锁 Cookie 分离；隐私文件需要同时满足登录和隐私解锁校验。
-- 原文件只读。视频 720P 副本单独存放，删除原文件时同步清理副本。
-- 当前没有前端路由，除 `/` 和实际存在的静态文件外，未知路径直接 404。
+- `server.js` 是组合根：显式初始化配置、数据库、日志、HTTP 服务和优雅退出。
+- `lib/api.js` 只负责来源校验、限流、公开路由、登录闸门、路由匹配和错误映射。
+- 业务处理器按认证、隐私、上传、文件/回收站分模块；
+- `lib/store.js` 封装全部业务 SQL，文件查询按 `owner_id` 隔离。
+- `lib/file-stream.js` 负责 Range、HEAD、下载和媒体流。
+- `lib/upload-finalizer.js` 统一分块上传和兼容上传的去重、配额和记录构造。
+- 普通登录 Cookie 与隐私 Cookie 分离；隐私文件需要同时通过两层校验。
+- 原文件只读；预览与缩略图是独立缓存，删除原文件时同步清理。
 
 ## 目录结构
 
 ```text
 .
-├─ server.js                         HTTP 服务入口
-├─ package.json                      Node 版本与 npm scripts
-├─ config.example.json               注册码配置模板
-├─ config.json                       首次启动自动生成，含注册码，不入 Git
-├─ LICENSE                           MIT License
+├─ server.js
+├─ package.json
+├─ config.example.json
+├─ config.json                 首次启动生成，含注册码，不入 Git
 ├─ README.md
 ├─ lib/
-│  ├─ api.js                         认证、文件、分块上传、回收站、隐私空间 API
-│  ├─ upload-session.js              断点续传上传会话、临时分块与过期清理
-│  ├─ auth.js                        scrypt 哈希、HMAC 令牌、Cookie
-│  ├─ config.js                      模式、CORS、Cookie、容量和站点配置
-│  ├─ cors.js                        CORS 响应与 OPTIONS 预检
-│  ├─ db.js                          SQLite 建表、迁移、索引
-│  ├─ media.js                       MIME 推断、分类、安全内联类型
-│  ├─ paths.js                       项目与数据目录常量
-│  ├─ rate-limit.js                  内存固定窗口限流
-│  ├─ static.js                      public/ 静态资源、ETag、CSP
-│  ├─ store.js                       参数化 SQL 数据访问层
-│  ├─ video-preview.js               可选视频 720P 预览生成与跳过标记
-│  └─ media-thumbnail.js             照片 / 视频封面生成、缓存与回退
+│  ├─ api.js                   路由、CORS/限流、认证闸门、错误映射
+│  ├─ api/
+│  │  ├─ core.js               共享会话、隐私、限流、文件工具
+│  │  ├─ auth.js               认证处理器
+│  │  ├─ privacy.js            隐私空间处理器
+│  │  ├─ uploads.js            上传处理器
+│  │  └─ files.js              文件与回收站处理器
+│  ├─ auth.js                  scrypt、HMAC、Cookie
+│  ├─ config.js                部署、CORS、容量、PUBLIC_ORIGIN
+│  ├─ db.js                    SQLite 初始化与 schema 基线
+│  ├─ migrations.js            编号式迁移和 schema_migrations
+│  ├─ store.js                 参数化 SQL 仓储
+│  ├─ upload-session.js        分块会话和临时文件
+│  ├─ upload-finalizer.js      共享上传最终提交规则
+│  ├─ file-stream.js           Range/HEAD/文件流
+│  ├─ fs-utils.js              安全文件删除
+│  ├─ media.js                 MIME、分类、安全内联
+│  ├─ media-thumbnail.js       缩略图
+│  ├─ video-preview.js         视频预览
+│  ├─ task-queue.js            有界去重任务队列
+│  ├─ rate-limit.js            内存限流
+│  ├─ cors.js                  CORS
+│  ├─ static.js                静态资源、ETag、CSP
+│  ├─ shutdown.js              优雅退出
+│  ├─ trash-sweeper.js         后台清理
+│  ├─ request-body.js          JSON 请求体限制
+│  ├─ request-url.js           请求 URL 解析
+│  ├─ http-response.js         统一 JSON 响应
+│  ├─ pagination.js            统一分页
+│  ├─ logger.js                结构化日志与脱敏
+│  └─ version.js               package.json 版本读取
 ├─ public/
 │  ├─ index.html
-│  ├─ app.js                         主界面、登录、文件列表、预览与文件操作
-│  ├─ transfers.js                   上传 / 下载任务队列与传输页面
+│  ├─ app.js
+│  ├─ transfers.js
 │  ├─ styles.css
-│  ├─ config.js                      前端 API 地址配置
+│  ├─ config.js
 │  └─ favicon.svg
 ├─ scripts/
-│  └─ optimize-video-previews.mjs    批量 / 单个视频预览生成
-└─ data/                             运行时生成，不入 Git
+│  ├─ optimize-video-previews.mjs
+│  └─ benchmark-file-queries.mjs
+├─ tests/
+└─ data/                       运行时生成，不入 Git
    ├─ vault.db
+   ├─ upload-sessions/<ownerId>/
    ├─ uploads/<ownerId>/
    ├─ previews/<ownerId>/
    └─ secret.key
 ```
-
-Unix 系统上，`data/` 和 `uploads/` 会尝试收紧到 `0700`，数据库与 `secret.key` 到 `0600`。Windows 可能忽略 Unix 权限位。
 
 ## 环境要求
 
@@ -312,9 +326,9 @@ icp: {
 
 - `index.html` 继续使用 `no-cache, must-revalidate`，确保部署后立即读取新版页面。
 - `config.js` 可能独立修改备案信息或 API 地址，因此也保持实时校验。
-- 带 `?v=` 版本参数的 `app.js`、`transfers.js`、`styles.css` 和图标使用一年期 `immutable` 强缓存。
-- 发布新版本时必须同步更新 `package.json`、`APP_VERSION` 和 `index.html` 中的 `?v=`。
-- 这样升级后会自动使用新 URL，同时快速刷新不会重复下载未变化的脚本和样式。
+- 静态资源不再手工维护 `?v=` 版本参数，统一使用 ETag 和 `no-cache, must-revalidate` 校验。
+- 版本号以 `package.json` 为唯一来源，服务端通过 `GET /api/meta` 返回，前端启动后显示。
+- 升级时只需更新 `package.json` 版本号；静态资源内容变化会通过 ETag 自动生效。
 - 登录状态确认后，主界面、普通文件列表和隐私锁定请求并行执行；进入隐私空间前仍会等待锁定完成，兼顾刷新速度与安全。
 
 ### 3. 环境变量
@@ -326,19 +340,20 @@ icp: {
 | `PORT` | `8787` | HTTP 监听端口；监听地址固定为 `0.0.0.0` |
 | `ALLOWED_ORIGINS` | 空 | 逗号分隔的前端 Origin，启用跨域 CORS |
 | `SERVE_STATIC` | 启用 | 设为 `0` 时本进程只提供 API，不托管 `public/` |
-| `TRUST_PROXY` | 关闭 | 仅当值严格等于 `1` 时信任 `CF-Connecting-IP` / `X-Forwarded-For` |
+| `TRUST_PROXY` | 关闭 | 仅当值严格等于 `1` 时信任 `X-Forwarded-For` / `X-Forwarded-Proto` |
+| `PUBLIC_ORIGIN` | 空 | 可选的服务正式 Origin，例如 `https://vault.example.com`；设置后用于同源判断 |
 
 #### 存储与上传
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
-| `MAX_USER_BYTES` | `10GiB` | 每用户总容量；`0` 表示不限制 |
-| `MIN_FREE_BYTES` | `1GiB` | 磁盘保留余量；低于此值拒绝上传 |
-| `MAX_UPLOAD_BYTES` | `2GiB` | 单文件上限 |
-| `UPLOAD_IDLE_TIMEOUT_MS` | `60000` | 上传连续无数据多久后断开 |
+| `MAX_USER_BYTES` | `10GiB` | 每用户总容量；`0` 表示不限制；必须是非负整数 |
+| `MIN_FREE_BYTES` | `1GiB` | 磁盘保留余量；低于此值拒绝上传；必须是非负整数 |
+| `MAX_UPLOAD_BYTES` | `2GiB` | 单文件上限；必须是大于 `0` 的整数 |
+| `UPLOAD_IDLE_TIMEOUT_MS` | `60000` | 上传连续无数据多久后断开；必须是大于 `0` 的整数 |
 | `MEDIA_RANGE_CHUNK_BYTES` | `32MiB` | 单次 206 响应上限，代码限制在 1–64MiB |
 
-`MAX_USER_BYTES`、`MIN_FREE_BYTES` 等数值变量应传入有效数字。当前代码不会对 `NaN` 给出启动错误。
+`PORT`、`MAX_USER_BYTES`、`MIN_FREE_BYTES`、`MAX_UPLOAD_BYTES` 和 `UPLOAD_IDLE_TIMEOUT_MS` 必须填写十进制整数。未设置或空白时使用默认值；格式或范围非法时服务会直接启动失败，不会静默关闭配额或超时保护。
 
 #### 视频预览
 
@@ -352,13 +367,15 @@ icp: {
 | `VIDEO_PREVIEW_MAXRATE_KBPS` | `2200` | 视频峰值码率上限 |
 | `VIDEO_PREVIEW_AUDIO_KBPS` | `96` | AAC 音频码率 |
 
-> `X-Forwarded-Proto` 在协议判断和 Secure Cookie 判断中会被读取。生产环境应只通过受信任反向代理访问，并由代理覆盖该头。启用 `TRUST_PROXY=1` 时，代理还必须覆盖而不是追加客户端提供的 `X-Forwarded-For`，否则限流 IP 可被伪造。
+> `X-Forwarded-Proto` 和 `X-Forwarded-For` 只有在 `TRUST_PROXY=1` 时才会被信任。生产环境应只通过受信任反向代理访问，并由代理覆盖而不是追加这两个头。建议同时设置 `PUBLIC_ORIGIN`，避免同源判断依赖可伪造的 Host。
 
 ## 常用命令
 
 | 命令 | 用途 |
 |---|---|
 | `npm start` | 启动 HTTP 服务 |
+| `npm test` | 运行 Node 内置测试套件 |
+| `npm run benchmark:files -- 10000` | 用固定数据量生成查询耗时和执行计划 |
 | `node server.js` | 直接启动，等价于 `npm start` |
 | `npm run preview:videos` | 为所有未删除视频尝试生成 / 复用 720P 副本 |
 | `npm run preview:video -- "文件名或文件ID"` | 处理指定视频 |
@@ -406,9 +423,24 @@ sqlite3 data/vault.db ".backup 'backup.db'"
 
 同时仍需单独备份 `data/uploads/`、`data/previews/`、`data/secret.key` 和 `config.json`。
 
+> 安全提示：当前数据目录、数据库和备份默认未加密。若备份包含隐私文件，必须使用加密存储并限制访问权限。`secret.key` 与数据库应分开保管，避免备份泄露后攻击者可伪造会话。
+
+恢复前应先在临时目录验证数据库完整性、文件数量和内容哈希；当前仓库没有自动恢复脚本，详细恢复演练属于待完善能力。
+
+### 旧 JSON 数据迁移
+
+- 仅当 SQLite 数据库中没有任何用户或文件记录时，才读取 `data/users.json` 和 `data/files.json`。
+- 文件读取失败、JSON 无法解析、顶层不是数组、关键字段缺失、owner 引用不存在或 `storedName` 不安全时，迁移会停止并让启动失败，原文件保持不变。
+- 数据导入使用单个事务；任一记录失败都会整体回滚，不会留下半迁移状态。
+- 导入成功后复制为 `*.json.migrated`。已有备份绝不覆盖；备份失败或原文件清理失败会保留原文件并在启动日志中输出警告。
+
 ### 单实例约束
 
 一个 `data/` 目录只应运行一个应用实例。限流和上传并发限制保存在进程内存中；多实例还会重复执行回收站清扫并增加 SQLite 锁竞争。
+
+### 进程退出
+
+收到 `SIGINT` 或 `SIGTERM` 后，服务会停止接收新连接、关闭空闲 keep-alive 连接，并等待在途请求完成。若 30 秒后仍有连接未结束，会强制关闭连接，最后关闭 SQLite 数据库。部署重启时应给进程留出这段退出时间。
 
 ## 视频 720P 预览副本
 
@@ -423,7 +455,7 @@ sqlite3 data/vault.db ".backup 'backup.db'"
 - 最终副本必须小于原片才会保留；否则删除并写入 `.skip.json`。
 - 跳过标记记录原片大小、修改时间、CRF、峰值码率和音频码率。参数或原片变化后会自动失效。
 - 普通批处理遇到有效跳过标记时不会重复编码；`--force` 可强制重试。
-- 720P 副本不计入用户原始文件配额，但会额外占用服务器磁盘。
+- 720P 副本不计入用户原始文件配额，但会额外占用服务器磁盘；生成前和编码过程中会检查 `MIN_FREE_BYTES` 保留余量。
 - 删除原文件、回收站彻底删除和隐私文件永久删除都会同步清理预览、封面和跳过标记。
 
 ### 照片与视频封面缩略图
@@ -489,10 +521,13 @@ API 默认返回 JSON，错误格式为：
 }
 ```
 
+普通 JSON 请求体必须是对象，默认最大 256KiB，并设有 30 秒空闲超时和 60 秒总超时。非法 JSON 或数组/null 等非对象值返回 `400`；请求体过大返回 `413 BODY_TOO_LARGE`；读取超时返回 `408 REQUEST_TIMEOUT`。
+
 浏览器身份主要通过 HttpOnly Cookie；服务端也接受 `Authorization: Bearer <token>`。
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
+| GET | `/api/meta` | 返回应用版本 |
 | GET | `/api/auth/config` | 是否需要注册码 |
 | POST | `/api/auth/register` | 注册并登录 |
 | POST | `/api/auth/login` | 登录 |
@@ -547,8 +582,8 @@ API 默认返回 JSON，错误格式为：
 ### 已实现
 
 - 密码使用随机盐 + scrypt；账号密码和隐私密码独立保存。
-- 会话使用 HMAC-SHA256 签名 HttpOnly Cookie，有效期 30 天。
-- 令牌包含会话版本；修改账号密码会撤销其它旧登录令牌。
+- 会话使用 HMAC-SHA256 签名 HttpOnly Cookie，有效期 30 天；新会话同时在 SQLite sessions 表中登记。
+- 令牌包含会话版本和会话 ID；退出登录会删除当前会话，修改账号密码会撤销其它旧登录令牌。升级前签发且不含会话 ID 的旧令牌在到期前仍保持兼容。
 - 隐私令牌额外包含 `scope`、隐私密码版本和会话版本。
 - 所有文件 SQL 查询按 `owner_id` 过滤；他人文件按 404 处理。
 - 文件名不直接用于磁盘路径；磁盘名使用随机 UUID + 安全扩展名。
@@ -557,6 +592,7 @@ API 默认返回 JSON，错误格式为：
 - CSP 仅放行 Cloudflare Web Analytics 的官方脚本和上报域名，不使用 `unsafe-inline`。
 - 浏览器请求校验 Origin / Sec-Fetch-Site；跨域来源必须列入 `ALLOWED_ORIGINS`。
 - 上传使用流式计数和空闲超时，超限会删除半成品。
+- 普通 JSON 请求体限制为 256KiB，并设置空闲和总时长超时；超限或超时不会在内存中持续缓存请求体。
 - 分块上传会话按用户隔离；临时文件使用 `0600`、会话目录使用 `0700` 权限位（Windows 忽略 POSIX 权限位）。
 - 上传会话在完整写盘后才推进偏移量；中断时会回滚未确认的分块，最终文件仍使用原内容哈希去重。
 - 隐私文件重复上传提示不会泄露私有名称。
@@ -570,7 +606,7 @@ API 默认返回 JSON，错误格式为：
 | 普通 API | 每 IP 600 次/分钟 |
 | 媒体 Range 请求 | 每 IP 3000 次/分钟 |
 | 登录 IP | 120 次/15 分钟 |
-| 单账号登录尝试 | 10 次/15 分钟 |
+| 单账号登录尝试 | 10 次/15 分钟；按规范化邮箱跨 IP 统一计数 |
 | 注册 | 每 IP 10 次/小时 |
 | 修改账号密码 | 每用户 10 次/15 分钟 |
 | 隐私设置 / 解锁 / 重置 | 每用户各 10 次/15 分钟 |
@@ -588,6 +624,20 @@ API 默认返回 JSON，错误格式为：
 - 如果签名密钥或数据库泄露，已有会话和隐私边界都可能失效。
 - 多进程部署会绕过当前内存限流的上限语义，应保持单实例。
 - `node:sqlite` 仍是实验性 API，升级 Node 主版本前应做兼容性验证。
+
+### 安全审计摘要（2026-11-06）
+
+- **高**：旧版无 sid 会话令牌继续兼容，削弱退出登录后的立即撤销；隐私令牌与会话令牌共用签名密钥，存在类型混淆边界。
+- **高**：会话和隐私令牌共享单一 HMAC 密钥，无密钥版本、轮换和独立派生。
+- **高**：隐私文件、数据库和备份未加密，属于明确的产品安全边界。
+- **中**：未设置 `PUBLIC_ORIGIN` 时同源判断依赖 Host；生产部署应显式配置。
+- **中**：会话为 30 天 Bearer Cookie，缺少设备管理和短期轮换。
+- **中**：隐私任务名称和状态会写入 localStorage。
+- **中**：首次启动日志可能包含注册码，媒体日志可能包含真实文件名。
+- **中**：上传文件 rename 与数据库写入不是跨资源原子操作，缺少启动时孤儿文件对账。
+- **中**：备份、恢复、迁移 checksum 和密码哈希参数版本化仍需完善。
+
+令牌类型、HMAC 密钥派生/轮换和密码哈希格式属于密码学设计变更，必须先完成方案评审和人工确认后再改代码。
 
 ## 部署方式
 
@@ -667,6 +717,7 @@ server {
     # 必须覆盖客户端传入的转发头，避免伪造来源 IP / 协议。
     proxy_set_header X-Forwarded-For $remote_addr;
     proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header CF-Connecting-IP "";
     proxy_set_header Host $host;
 
     # 默认 1m 会拦截大文件上传，应与 MAX_UPLOAD_BYTES 协调。
@@ -687,7 +738,7 @@ server {
 
 ## 测试与验证
 
-当前仓库**没有自动化测试套件、测试目录或 `npm test` 脚本**，也没有 ESLint / Prettier 配置。以下命令可作为提交前的最低静态验证。
+当前仓库使用 Node 内置 `node:test`，运行 `npm test` 会自动发现 `tests/*.test.js`；当前共有 60 项后端与边界测试。测试使用内存 SQLite、流对象和系统临时目录，不读取真实 `data/`。仓库仍未配置 ESLint / Prettier；以下命令可作为额外的静态验证。
 
 ### PowerShell
 
@@ -729,7 +780,7 @@ git diff --check
 
 ## 已知边界与待确认事项
 
-- 项目没有自动化测试；接口、浏览器端和跨域行为仍主要依赖人工验证。
+- 后端安全与迁移边界已有自动化测试，但浏览器端、跨域部署和不同设备组合仍主要依赖人工验证。
 - HTTPS、Nginx、systemd、Cloudflare 和不同浏览器 / 移动设备组合未在本仓库内自动验证。
 - 跨域部署需要静态托管平台额外配置 CSP 和 CORS；仓库只提供后端侧 CORS。
 - `node:sqlite` 的实验性 API 兼容性需要随 Node 版本升级持续确认。
@@ -738,7 +789,10 @@ git diff --check
 - 单进程限流不适用于多实例部署。
 - 页面内断点续传下载依赖 File System Access API；Firefox / Safari 等回退路径无法显示浏览器自身的实时下载进度。
 - 页面刷新后上传任务必须重新选择原文件，下载任务能否无提示继续取决于浏览器对已保存文件句柄权限的策略。
-- `MAX_USER_BYTES` / `MIN_FREE_BYTES` 等环境变量缺少非法数值启动校验，部署时需人工确认。
+- 旧版不含 `sid` 的会话令牌在自然过期前仍保持兼容，退出登录不能立即撤销这类令牌。
+- 隐私空间是应用层访问控制，不是磁盘加密；数据库和上传文件默认明文存储。
+- 当前没有自动备份恢复脚本、迁移 checksum、启动时孤儿文件对账和浏览器端安全 E2E 测试。
+- FFmpeg 版本和 Node 运行时补丁版本需要在部署侧固定并纳入发布检查。
 
 ## 许可证
 

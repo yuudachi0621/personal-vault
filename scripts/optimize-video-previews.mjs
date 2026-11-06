@@ -10,7 +10,7 @@
  */
 
 import fs from 'node:fs'
-import { db, mapFile, closeDb } from '../lib/db.js'
+import { initializeDatabase, mapFile, closeDb } from '../lib/db.js'
 import { generateVideoPreview, isFfmpegAvailable } from '../lib/video-preview.js'
 
 const args = process.argv.slice(2)
@@ -23,12 +23,14 @@ if (!all && !target) {
   console.error('   或：node scripts/optimize-video-previews.mjs --all')
   process.exit(1)
 }
-if (!isFfmpegAvailable()) {
+if (!(await isFfmpegAvailable())) {
   console.error('未找到 ffmpeg。请先安装，例如 Ubuntu：sudo apt install -y ffmpeg')
   console.error('如 ffmpeg 不在 PATH 中，可设置 FFMPEG_PATH=/absolute/path/to/ffmpeg')
   closeDb()
   process.exit(1)
 }
+
+const { db } = await initializeDatabase()
 
 let records
 if (all) {
