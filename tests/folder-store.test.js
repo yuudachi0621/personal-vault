@@ -61,6 +61,7 @@ test('moves folders while rejecting self, descendant and duplicate-name targets'
     createFolder({ id: 'root-b', ownerId: 'u_move', parentId: null, name: 'B', createdAt: now, updatedAt: now })
     createFolder({ id: 'child-a', ownerId: 'u_move', parentId: 'root-a', name: 'Child', createdAt: now, updatedAt: now })
 
+    assert.deepEqual(listFolders({ ownerId: 'u_move', parentId: null, sort: 'name-desc' }).map((folder) => folder.id), ['root-b', 'root-a'])
     assert.equal(moveFolder('root-b', 'u_move', 'root-a').parentId, 'root-a')
     assert.throws(() => moveFolder('root-a', 'u_move', 'root-a'), (error) => error.code === 'FOLDER_CYCLE')
     assert.throws(() => moveFolder('root-a', 'u_move', 'child-a'), (error) => error.code === 'FOLDER_CYCLE')

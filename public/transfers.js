@@ -222,6 +222,7 @@ function syncTransferViewVisibility() {
   }
 
   $('#file-grid').hidden = true
+  $('#list-header').hidden = true
   $('#skeleton').hidden = true
   $('#empty-state').hidden = true
   $('#trash-banner').hidden = true

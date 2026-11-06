@@ -168,6 +168,28 @@ const PAGE_SIZE = 30
 let listRequestVersion = 0
 const VIDEO_QUALITY_KEY = 'personal-vault:video-quality'
 const VIEW_MODE_KEY = 'personal-vault:view-mode'
+/**
+ * 列表表头排序状态。
+ * field=null 表示按上传时间排序，此时表头不显示当前列，但仍可通过下拉框选择。
+ */
+const SORT_STATES = {
+  newest: { field: null, direction: 'desc' },
+  oldest: { field: null, direction: 'asc' },
+  name: { field: 'name', direction: 'asc' },
+  'name-desc': { field: 'name', direction: 'desc' },
+  largest: { field: 'size', direction: 'desc' },
+  smallest: { field: 'size', direction: 'asc' },
+  type: { field: 'type', direction: 'asc' },
+  'type-desc': { field: 'type', direction: 'desc' },
+  updated: { field: 'modified', direction: 'desc' },
+  'updated-asc': { field: 'modified', direction: 'asc' },
+}
+const SORT_BY_FIELD = {
+  name: { asc: 'name', desc: 'name-desc' },
+  size: { asc: 'smallest', desc: 'largest' },
+  type: { asc: 'type', desc: 'type-desc' },
+  modified: { asc: 'updated-asc', desc: 'updated' },
+}
 const PRIVACY_IDLE_MS = 10 * 60 * 1000
 const PRIVACY_HEARTBEAT_MS = 4 * 60 * 1000
 let privacyIdleTimer = 0
@@ -208,6 +230,14 @@ function formatDate(iso) {
   if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} 小时前`
   if (diff < 7 * 86_400_000) return `${Math.floor(diff / 86_400_000)} 天前`
   return date.toLocaleDateString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' })
+}
+
+/** 列表的修改日期使用固定“YYYY-MM-DD HH:mm”，避免相对时间影响列宽和比较。 */
+function formatDateTime(iso) {
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return '—'
+  const pad = (value) => String(value).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
 }
 
 function escapeHtml(text) {
@@ -1015,6 +1045,9 @@ function cardHtml(record) {
       <div class="card-name" title="${escapeHtml(record.name)}">${escapeHtml(record.name)}</div>
       <div class="card-meta">${formatSize(record.size)} · ${formatDate(record.createdAt)}</div>
     </div>
+    <div class="card-list-size">${formatSize(record.size)}</div>
+    <div class="card-list-type">${CATEGORY_LABEL[record.category] || '文件'}</div>
+    <div class="card-list-date">${formatDateTime(record.updatedAt || record.createdAt)}</div>
   </article>`
 }
 
@@ -1046,6 +1079,9 @@ function folderCardHtml(folder) {
       <div class="card-name" title="${escapeHtml(folder.name)}">${escapeHtml(folder.name)}</div>
       <div class="card-meta">文件夹 · ${formatDate(folder.createdAt)}</div>
     </div>
+    <div class="card-list-size" title="文件夹不统计大小">—</div>
+    <div class="card-list-type">文件夹</div>
+    <div class="card-list-date">${formatDateTime(folder.updatedAt || folder.createdAt)}</div>
   </article>`
 }
 
@@ -1140,7 +1176,43 @@ function renderFolderBreadcrumb() {
   ]
   nav.innerHTML = items.join('')
 }
-/** 把当前视图模式同步到文件网格和两个切换按钮；按钮状态同时暴露给辅助技术。 */
+function currentSortState() {
+  return SORT_STATES[state.sort] || SORT_STATES.newest
+}
+
+/** 同步排序下拉框与表头方向标记；表头只在列表模式显示。 */
+function renderListHeader() {
+  const header = $('#list-header')
+  if (!header) return
+  header.hidden = state.viewMode !== 'list' || state.transferMode || (!state.files.length && !state.folders.length)
+  const current = currentSortState()
+  $$('[data-list-sort]', header).forEach((button) => {
+    const active = current.field === button.dataset.listSort
+    button.classList.toggle('is-active', active)
+    button.dataset.direction = active ? current.direction : ''
+    button.setAttribute('aria-pressed', active ? 'true' : 'false')
+    button.setAttribute('aria-label', active
+      ? `${button.dataset.label}，当前${current.direction === 'asc' ? '正序' : '倒序'}，点击切换`
+      : `${button.dataset.label}，点击排序`)
+  })
+  const select = $('#sort-select')
+  if (select && select.value !== state.sort) select.value = state.sort
+}
+
+/** 点击列表表头：首次按该列默认方向，重复点击只反转方向。 */
+function toggleListSort(field) {
+  if (!SORT_BY_FIELD[field]) return
+  const current = currentSortState()
+  const direction = current.field === field
+    ? (current.direction === 'asc' ? 'desc' : 'asc')
+    : (field === 'name' || field === 'type' ? 'asc' : 'desc')
+  state.sort = SORT_BY_FIELD[field][direction]
+  state.page = 1
+  renderListHeader()
+  void refresh()
+}
+
+/** 把当前视图模式同步到网格、表头和切换按钮；按钮状态同时暴露给辅助技术。 */
 function applyViewMode() {
   const grid = $('#file-grid')
   if (!grid) return
@@ -1151,6 +1223,7 @@ function applyViewMode() {
     button.classList.toggle('is-active', active)
     button.setAttribute('aria-pressed', active ? 'true' : 'false')
   })
+  renderListHeader()
 }
 
 /** 切换网格 / 列表视图；写入 localStorage 后刷新页面仍保持用户选择。 */
@@ -1331,7 +1404,7 @@ function renderPagination() {
  * 这里统一响应结构，让上层渲染逻辑不必区分数据来源。
  *
  * @param {number} offset 已加载条数
- * @returns {Promise<{files: object[], usage: object, page: object, ttlMs?: number}>}
+ * @returns {Promise<{files: object[], folders?: object[], folder?: object|null, breadcrumbs?: object[], usage: object, page: object, ttlMs?: number}>}
  */
 async function fetchPage(offset) {
   if (state.privacyMode) {
@@ -1345,6 +1418,7 @@ async function fetchPage(offset) {
   if (state.trash) {
     const params = new URLSearchParams()
     if (state.query) params.set('q', state.query)
+    params.set('sort', state.sort)
     params.set('limit', String(PAGE_SIZE))
     params.set('offset', String(offset))
     const data = await api(`/api/trash?${params}`)
@@ -2831,11 +2905,16 @@ function bindApp() {
     void dropCardIntoFolder(event.dataTransfer, target === 'root' ? null : target)
   })
 
-  // 排序
+  // 排序：下拉框覆盖所有模式，列表表头提供同字段的快捷切换。
   $('#sort-select').addEventListener('change', (event) => {
     state.sort = event.target.value
     state.page = 1
-    refresh()
+    renderListHeader()
+    void refresh()
+  })
+  $('#list-header').addEventListener('click', (event) => {
+    const button = event.target.closest('[data-list-sort]')
+    if (button) toggleListSort(button.dataset.listSort)
   })
 
   // 搜索（防抖）

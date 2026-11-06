@@ -285,10 +285,16 @@
             <label class="select">
               <span>排序</span>
               <select id="sort-select">
-                <option value="newest">最新上传</option>
+                <option value="newest" selected>最新上传</option>
                 <option value="oldest">最早上传</option>
-                <option value="name">名称</option>
-                <option value="largest">体积从大到小</option>
+                <option value="updated-asc">修改日期：正序</option>
+                <option value="updated">修改日期：倒序</option>
+                <option value="name">名称：正序</option>
+                <option value="name-desc">名称：倒序</option>
+                <option value="type">文件类型：正序</option>
+                <option value="type-desc">文件类型：倒序</option>
+                <option value="smallest">大小：正序</option>
+                <option value="largest">大小：倒序</option>
               </select>
             </label>
             <!-- 视图模式是前端状态，选择会由 app.js 写入 localStorage。 -->
@@ -345,6 +351,15 @@
             <span>回收站里的内容到期自动清除，期间可以随时恢复。</span>
           </div>
           <button class="btn btn-ghost btn-sm is-danger" type="button" id="empty-trash-btn">清空回收站</button>
+        </div>
+
+        <!-- 列表表头与文件行共用同一套列宽；点击可切换字段和正序 / 倒序。 -->
+        <div id="list-header" class="list-header" hidden>
+          <button type="button" class="list-sort" data-list-sort="name" data-label="名称">名称<i class="list-sort-icon" aria-hidden="true"></i></button>
+          <button type="button" class="list-sort" data-list-sort="size" data-label="大小">大小<i class="list-sort-icon" aria-hidden="true"></i></button>
+          <button type="button" class="list-sort" data-list-sort="type" data-label="文件类型">文件类型<i class="list-sort-icon" aria-hidden="true"></i></button>
+          <button type="button" class="list-sort" data-list-sort="modified" data-label="修改日期">修改日期<i class="list-sort-icon" aria-hidden="true"></i></button>
+          <span class="list-head-spacer" aria-hidden="true"></span>
         </div>
 
         <div id="file-grid" class="file-grid"></div>
